@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Float
+from sqlalchemy import Boolean, Column, Integer, String, ForeignKey, DateTime, Float
 from sqlalchemy.orm import relationship, declarative_base
 from datetime import datetime
 
@@ -29,4 +29,5 @@ class TimeEntry(Base):
     start_time = Column(DateTime, default=datetime.now)
     end_time = Column(DateTime, nullable=True)
     duration_seconds = Column(Float, default=0.0)
+    invoiced = Column(Boolean, default=False, nullable=False)
     matter = relationship("Matter", back_populates="time_entries")

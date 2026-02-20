@@ -7,7 +7,7 @@ from datetime import datetime, date, timedelta
 from contextlib import contextmanager
 from typing import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 
 from models import Base, Matter, TimeEntry
@@ -35,8 +35,18 @@ class DatabaseManager:
             session.close()
 
     def init_db(self) -> None:
-        """Create tables if they do not exist."""
+        """Create tables if they do not exist. Add invoiced column to time_entries if missing."""
         Base.metadata.create_all(self._engine)
+        # Migration: add invoiced column if it doesn't exist (e.g. existing DBs from before timesheet)
+        with self._engine.connect() as conn:
+            r = conn.execute(
+                text("SELECT 1 FROM pragma_table_info('time_entries') WHERE name='invoiced'")
+            )
+            if r.fetchone() is None:
+                conn.execute(
+                    text("ALTER TABLE time_entries ADD COLUMN invoiced BOOLEAN NOT NULL DEFAULT 0")
+                )
+                conn.commit()
 
     def _slugify(self, name: str) -> str:
         """Lowercase, replace non-alphanumeric with hyphen, strip. Empty -> 'matter'."""
@@ -159,6 +169,59 @@ class DatabaseManager:
                 .order_by(TimeEntry.start_time.desc())
                 .all()
             )
+
+    def get_descendant_matter_ids(self, matter_id: int) -> set[int]:
+        """Return the set of matter ids that are descendants of matter_id (children, grandchildren, etc.)."""
+        with self._session() as session:
+            child_rows = (
+                session.query(Matter.id).filter(Matter.parent_id == matter_id).all()
+            )
+        child_ids = {r[0] for r in child_rows}
+        ids = set(child_ids)
+        for cid in child_ids:
+            ids |= self.get_descendant_matter_ids(cid)
+        return ids
+
+    def get_time_entries_for_export(
+        self, matter_ids: set[int], only_not_invoiced: bool
+    ) -> list[dict]:
+        """
+        Return time entries whose matter_id is in matter_ids, optionally only not-invoiced.
+        Each item is a dict: id, matter_id, matter_path, description, start_time, end_time, duration_seconds, invoiced.
+        Times as ISO strings.
+        """
+        if not matter_ids:
+            return []
+        with self._session() as session:
+            q = session.query(TimeEntry).filter(TimeEntry.matter_id.in_(matter_ids))
+            if only_not_invoiced:
+                q = q.filter(TimeEntry.invoiced == False)
+            entries = q.order_by(TimeEntry.start_time).all()
+            result = []
+            for e in entries:
+                matter = session.query(Matter).get(e.matter_id)
+                path = matter.get_full_path(session) if matter else ""
+                result.append({
+                    "id": e.id,
+                    "matter_id": e.matter_id,
+                    "matter_path": path,
+                    "description": e.description or "",
+                    "start_time": e.start_time.isoformat() if e.start_time else "",
+                    "end_time": e.end_time.isoformat() if e.end_time else "",
+                    "duration_seconds": e.duration_seconds or 0.0,
+                    "invoiced": bool(e.invoiced),
+                })
+            return result
+
+    def mark_entries_invoiced(self, entry_ids: list[int]) -> None:
+        """Set invoiced=True for all TimeEntry rows with id in entry_ids."""
+        if not entry_ids:
+            return
+        with self._session() as session:
+            session.query(TimeEntry).filter(TimeEntry.id.in_(entry_ids)).update(
+                {TimeEntry.invoiced: True}, synchronize_session=False
+            )
+            session.commit()
 
     def _resolve_time_trio(
         self,

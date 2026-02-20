@@ -2,8 +2,10 @@
 Sentinel Solo: Flet UI with Timer and Manage Matters.
 """
 import asyncio
+import json
 from collections import defaultdict
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Callable
 
 import flet as ft
@@ -108,9 +110,11 @@ class SentinelApp:
             page.update()
 
         reporting_tab = self._build_reporting_tab(on_toggle_client)
+        timesheet_tab = self._build_timesheet_tab()
         timer_container = ft.Container(content=timer_tab, expand=True)
         matters_container = ft.Container(content=matters_tab, expand=True)
         reporting_container = ft.Container(content=reporting_tab, expand=True)
+        timesheet_container = ft.Container(content=timesheet_tab, expand=True)
 
         def show_timer(_):
             self.body_ref.current.content = timer_container
@@ -128,14 +132,20 @@ class SentinelApp:
             self.body_ref.current.content = reporting_container
             page.update()
 
+        def show_timesheet(_):
+            self.body_ref.current.content = timesheet_container
+            page.update()
+
         def on_rail_change(e):
             idx = e.control.selected_index
             if idx == 0:
                 show_timer(e)
             elif idx == 1:
                 show_matters(e)
-            else:
+            elif idx == 2:
                 show_reporting(e)
+            else:
+                show_timesheet(e)
 
         rail = ft.NavigationRail(
             selected_index=0,
@@ -157,6 +167,11 @@ class SentinelApp:
                     icon=ft.Icons.ASSESSMENT,
                     selected_icon=ft.Icons.ASSESSMENT,
                     label="Reporting",
+                ),
+                ft.NavigationRailDestination(
+                    icon=ft.Icons.UPLOAD,
+                    selected_icon=ft.Icons.UPLOAD,
+                    label="Timesheet",
                 ),
             ],
             on_change=on_rail_change,
@@ -1415,6 +1430,191 @@ class SentinelApp:
                     content=ft.Column(client_blocks, scroll=ft.ScrollMode.AUTO),
                     expand=True,
                 ),
+            ],
+            expand=True,
+            horizontal_alignment=ft.CrossAxisAlignment.START,
+        )
+
+    def _build_timesheet_tab(self) -> ft.Control:
+        """Timesheet tab: matter selection (checkboxes, parent selects descendants), export to JSON, optional mark as invoiced."""
+        page = self.page
+        path_list = self.db.get_matters_with_full_paths()
+        timesheet_selected_ids: set[int] = set()
+        timesheet_expanded: set[str] = set()
+        timesheet_search_ref = ft.Ref[ft.TextField]()
+        timesheet_list_ref = ft.Ref[ft.Column]()
+        only_not_invoiced_ref = ft.Ref[ft.Checkbox]()
+
+        def _options_by_client_timesheet(opts: list[tuple[int, str]]) -> dict:
+            by_client = defaultdict(list)
+            for mid, path in opts:
+                client = path.split(" > ")[0] if " > " in path else path
+                by_client[client].append((mid, path))
+            for client in by_client:
+                by_client[client].sort(key=lambda x: x[1])
+            return by_client
+
+        def _build_timesheet_list_controls(query: str):
+            q = (query or "").strip().lower()
+            if q:
+                flat = [(mid, path) for mid, path in path_list if path and q in path.lower()][:30]
+                return [
+                    ft.ListTile(
+                        title=ft.Text(path, size=14),
+                        leading=ft.Checkbox(
+                            value=mid in timesheet_selected_ids,
+                            on_change=lambda e, mid=mid: _on_timesheet_check(mid, e.control.value),
+                        ),
+                    )
+                    for mid, path in flat
+                ]
+            controls = []
+            by_client = _options_by_client_timesheet(path_list)
+            for client_name in sorted(by_client.keys()):
+                items = by_client[client_name]
+                is_exp = client_name in timesheet_expanded
+                controls.append(
+                    ft.ListTile(
+                        title=ft.Text(client_name, weight=ft.FontWeight.W_500, size=14),
+                        subtitle=ft.Text(f"{len(items)} matter(s)", size=12),
+                        trailing=ft.Icon(ft.Icons.EXPAND_LESS if is_exp else ft.Icons.EXPAND_MORE, size=20),
+                        on_click=lambda e, c=client_name: _on_toggle_timesheet_expanded(c),
+                    ),
+                )
+                controls.append(
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.ListTile(
+                                    title=ft.Text(path, size=14),
+                                    leading=ft.Checkbox(
+                                        value=mid in timesheet_selected_ids,
+                                        on_change=lambda e, mid=mid: _on_timesheet_check(mid, e.control.value),
+                                    ),
+                                )
+                                for mid, path in items
+                            ],
+                        ),
+                        visible=is_exp,
+                        padding=ft.Padding.only(left=20),
+                    ),
+                )
+            return controls
+
+        def _on_toggle_timesheet_expanded(client_name: str):
+            timesheet_expanded.symmetric_difference_update([client_name])
+            if timesheet_list_ref.current:
+                timesheet_list_ref.current.controls = _build_timesheet_list_controls(
+                    timesheet_search_ref.current.value if timesheet_search_ref.current else ""
+                )
+                page.update()
+
+        def _on_timesheet_check(matter_id: int, checked: bool):
+            nonlocal timesheet_selected_ids
+            if checked:
+                timesheet_selected_ids.add(matter_id)
+                timesheet_selected_ids |= self.db.get_descendant_matter_ids(matter_id)
+            else:
+                timesheet_selected_ids.discard(matter_id)
+            if timesheet_list_ref.current:
+                timesheet_list_ref.current.controls = _build_timesheet_list_controls(
+                    timesheet_search_ref.current.value if timesheet_search_ref.current else ""
+                )
+                page.update()
+
+        def _on_search_change(_):
+            if timesheet_list_ref.current and timesheet_search_ref.current:
+                timesheet_list_ref.current.controls = _build_timesheet_list_controls(
+                    timesheet_search_ref.current.value
+                )
+                page.update()
+
+        def _do_export(_):
+            if not timesheet_selected_ids:
+                page.snack_bar = ft.SnackBar(content=ft.Text("Select at least one matter"))
+                page.snack_bar.open = True
+                page.update()
+                return
+            only_not_invoiced = (
+                only_not_invoiced_ref.current.value if only_not_invoiced_ref.current else True
+            )
+            entries = self.db.get_time_entries_for_export(
+                timesheet_selected_ids, only_not_invoiced=only_not_invoiced
+            )
+            if not entries:
+                page.snack_bar = ft.SnackBar(
+                    content=ft.Text("No matching time entries for the selected matters.")
+                )
+                page.snack_bar.open = True
+                page.update()
+                return
+            export_time = datetime.now().isoformat()
+            payload = {
+                "exported_at": export_time,
+                "only_not_invoiced": only_not_invoiced,
+                "entries": entries,
+            }
+            exports_dir = Path(__file__).resolve().parent / "exports"
+            exports_dir.mkdir(exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_path = exports_dir / f"timesheet_{timestamp}.json"
+            out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            entry_ids = [e["id"] for e in entries]
+
+            def _on_mark_yes(_):
+                self.db.mark_entries_invoiced(entry_ids)
+                dialog.open = False
+                page.snack_bar = ft.SnackBar(content=ft.Text("Entries marked as invoiced."))
+                page.snack_bar.open = True
+                page.update()
+
+            def _on_mark_no(_):
+                dialog.open = False
+                page.update()
+
+            dialog = ft.AlertDialog(
+                title=ft.Text("Mark as invoiced?"),
+                content=ft.Text(
+                    f"Timesheet exported to {out_path}. Do you want to mark the exported entries as invoiced?"
+                ),
+                actions=[
+                    ft.TextButton("No", on_click=_on_mark_no),
+                    ft.ElevatedButton("Yes", on_click=_on_mark_yes),
+                ],
+            )
+            page.overlay.append(dialog)
+            dialog.open = True
+            page.update()
+
+        search_field = ft.TextField(
+            label="Search matters by name or path",
+            width=400,
+            ref=timesheet_search_ref,
+            on_change=_on_search_change,
+        )
+        only_not_invoiced_cb = ft.Checkbox(
+            label="Only include entries not yet marked as invoiced",
+            value=True,
+            ref=only_not_invoiced_ref,
+        )
+        list_column = ft.Column(
+            ref=timesheet_list_ref,
+            controls=_build_timesheet_list_controls(""),
+            scroll=ft.ScrollMode.AUTO,
+        )
+        return ft.Column(
+            [
+                ft.Text("Timesheet", size=24, weight=ft.FontWeight.BOLD),
+                ft.Container(height=16),
+                search_field,
+                ft.Container(height=8),
+                only_not_invoiced_cb,
+                ft.Container(height=8),
+                ft.ElevatedButton("Export timesheet", icon=ft.Icons.UPLOAD, on_click=_do_export),
+                ft.Container(height=16),
+                ft.Text("Matters", size=16, weight=ft.FontWeight.W_500),
+                ft.Container(height=8),
+                ft.Container(content=list_column, expand=True),
             ],
             expand=True,
             horizontal_alignment=ft.CrossAxisAlignment.START,
