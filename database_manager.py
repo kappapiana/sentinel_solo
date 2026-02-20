@@ -3,7 +3,7 @@ Database manager for Sentinel Solo: matters and time entries.
 """
 import re
 from pathlib import Path
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
@@ -118,6 +118,122 @@ def get_running_entry() -> TimeEntry | None:
             .order_by(TimeEntry.start_time.desc())
             .first()
         )
+
+
+def get_time_entries_by_matter(matter_id: int) -> list[TimeEntry]:
+    """Return all time entries for the matter, newest first."""
+    with get_session() as session:
+        return list(
+            session.query(TimeEntry)
+            .filter(TimeEntry.matter_id == matter_id)
+            .order_by(TimeEntry.start_time.desc())
+            .all()
+        )
+
+
+def _resolve_time_trio(
+    start_time: datetime | None,
+    end_time: datetime | None,
+    duration_seconds: float | None,
+) -> tuple[datetime, datetime | None, float]:
+    """
+    Given any two of start_time, end_time, duration_seconds, compute the third.
+    Returns (start_time, end_time, duration_seconds). Raises ValueError if not exactly two provided.
+    """
+    provided = sum(x is not None for x in (start_time, end_time, duration_seconds))
+    if provided != 2:
+        raise ValueError("Provide exactly two of start_time, end_time, duration_seconds.")
+    if start_time is not None and end_time is not None:
+        duration_seconds = (end_time - start_time).total_seconds()
+        if duration_seconds < 0:
+            raise ValueError("End time must be after start time.")
+    elif start_time is not None and duration_seconds is not None:
+        if duration_seconds < 0:
+            raise ValueError("Duration must be non-negative.")
+        end_time = start_time + timedelta(seconds=duration_seconds)
+    else:
+        assert end_time is not None and duration_seconds is not None
+        if duration_seconds < 0:
+            raise ValueError("Duration must be non-negative.")
+        start_time = end_time - timedelta(seconds=duration_seconds)
+    return (start_time, end_time, duration_seconds)
+
+
+def update_time_entry(
+    entry_id: int,
+    description: str | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    duration_seconds: float | None = None,
+) -> None:
+    """
+    Update a time entry. If description is provided, set it.
+    Provide either all three of start_time, end_time, duration_seconds (must be consistent),
+    or exactly two and the third is computed.
+    """
+    with get_session() as session:
+        entry = session.query(TimeEntry).get(entry_id)
+        if entry is None:
+            raise ValueError("Time entry not found.")
+        if description is not None:
+            entry.description = description
+        time_args = [start_time, end_time, duration_seconds]
+        if any(x is not None for x in time_args):
+            provided = sum(x is not None for x in time_args)
+            if provided == 3:
+                if duration_seconds is not None and duration_seconds < 0:
+                    raise ValueError("Duration must be non-negative.")
+                if start_time and end_time and end_time < start_time:
+                    raise ValueError("End time must be after start time.")
+                entry.start_time = start_time
+                entry.end_time = end_time
+                entry.duration_seconds = duration_seconds or 0.0
+            else:
+                start_t, end_t, dur = _resolve_time_trio(start_time, end_time, duration_seconds)
+                entry.start_time = start_t
+                entry.end_time = end_t
+                entry.duration_seconds = dur
+        session.commit()
+
+
+def add_manual_time_entry(
+    matter_id: int,
+    description: str,
+    *,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    duration_seconds: float | None = None,
+) -> TimeEntry:
+    """
+    Add a completed time entry manually. Provide either all three of start_time, end_time, duration_seconds
+    (must be consistent) or exactly two and the third is computed. Matter must exist and not be a root.
+    """
+    with get_session() as session:
+        matter = session.query(Matter).get(matter_id)
+        if matter is None:
+            raise ValueError("Matter not found.")
+        if matter.parent_id is None:
+            raise ValueError("Time cannot be logged to a client.")
+        provided = sum(x is not None for x in (start_time, end_time, duration_seconds))
+        if provided == 3:
+            if duration_seconds is not None and duration_seconds < 0:
+                raise ValueError("Duration must be non-negative.")
+            if start_time and end_time and end_time < start_time:
+                raise ValueError("End time must be after start time.")
+            start_t, end_t, dur = start_time, end_time, duration_seconds or 0.0
+        else:
+            start_t, end_t, dur = _resolve_time_trio(start_time, end_time, duration_seconds)
+        entry = TimeEntry(
+            matter_id=matter_id,
+            description=description or "",
+            start_time=start_t,
+            end_time=end_t,
+            duration_seconds=dur,
+        )
+        session.add(entry)
+        session.commit()
+        session.refresh(entry)
+        return entry
 
 
 def _get_root_matter_name(session: Session, matter: Matter) -> str:

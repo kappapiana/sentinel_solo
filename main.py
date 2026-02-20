@@ -3,7 +3,7 @@ Sentinel Solo: Flet UI with Timer and Manage Matters.
 """
 import asyncio
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable
 
 import flet as ft
@@ -22,7 +22,13 @@ from database_manager import (
     suggest_unique_code,
     move_matter,
     merge_matter_into,
+    get_time_entries_by_matter,
+    update_time_entry,
+    add_manual_time_entry,
 )
+
+
+DATETIME_FMT = "%Y-%m-%d %H:%M"
 
 
 def format_elapsed(seconds: float) -> str:
@@ -33,25 +39,165 @@ def format_elapsed(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def format_datetime(dt: datetime | None) -> str:
+    """Format for display and editing."""
+    if dt is None:
+        return ""
+    return dt.strftime(DATETIME_FMT)
+
+
+def parse_datetime(s: str) -> datetime | None:
+    """Parse YYYY-MM-DD HH:MM."""
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s, DATETIME_FMT)
+    except ValueError:
+        return None
+
+
+def parse_duration_hours(s: str) -> float | None:
+    """Parse duration as decimal hours (e.g. 1.5) or H:MM / HH:MM."""
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        if ":" in s:
+            parts = s.split(":")
+            h = int(parts[0].strip())
+            m = int(parts[1].strip()) if len(parts) > 1 else 0
+            return h + m / 60.0
+        return float(s)
+    except (ValueError, IndexError):
+        return None
+
+
+def _compute_third_time_static(start_s: str, end_s: str, duration_s: str) -> tuple[datetime | None, datetime | None, float | None]:
+    """From two of start/end/duration (parsed), return (start, end, duration_seconds). Shared for timer and matters."""
+    start = parse_datetime(start_s)
+    end = parse_datetime(end_s)
+    dur_h = parse_duration_hours(duration_s)
+    dur_sec = dur_h * 3600.0 if dur_h is not None else None
+    if start is not None and end is not None:
+        return (start, end, (end - start).total_seconds())
+    if start is not None and dur_sec is not None:
+        return (start, start + timedelta(seconds=dur_sec), dur_sec)
+    if end is not None and dur_sec is not None:
+        return (end - timedelta(seconds=dur_sec), end, dur_sec)
+    return (None, None, None)
+
+
 def build_timer_tab(
     page: ft.Page,
     timer_label: ft.Ref[ft.Text],
-    matter_dropdown: ft.Ref[ft.Dropdown],
+    matter_dropdown: ft.Ref[ft.Column],
     running_ref: list[bool],
     start_time_ref: list[datetime | None],
 ) -> ft.Control:
-    """Build the Timer tab: dropdown (full path), Start/Stop, live-updating label.
-    Only matters under a client are shown (no time on client/root)."""
+    """Build the Timer tab: searchable folded matter list, task description, Start/Stop, live-updating label.
+    Only matters under a client are shown (no time on client/root). Includes manual time entry section."""
     options = get_matters_with_full_paths(for_timer=True)
-    dropdown = ft.Dropdown(
-        ref=matter_dropdown,
-        label="Matter",
-        width=400,
-        options=[ft.DropdownOption(key=str(mid), text=path) for mid, path in options],
-        value=str(options[0][0]) if options else None,
-        enable_filter=True,
-        editable=True,
-    )
+    timer_matter_selected: list = [options[0][0], options[0][1]] if options else [None, None]
+    timer_matter_expanded: set = set()
+    timer_matter_search_ref = ft.Ref[ft.TextField]()
+    timer_matter_list_ref = matter_dropdown
+    timer_matter_selection_ref = ft.Ref[ft.Text]()
+
+    def _options_by_client_timer(opts: list[tuple[int, str]]) -> dict:
+        by_client = defaultdict(list)
+        for mid, path in opts:
+            client = path.split(" > ")[0] if " > " in path else path
+            by_client[client].append((mid, path))
+        for client in by_client:
+            by_client[client].sort(key=lambda x: x[1])
+        return by_client
+
+    def _build_timer_matter_list(query: str):
+        q = (query or "").strip().lower()
+        if q:
+            flat = [(mid, path) for mid, path in options if path and q in path.lower()][:20]
+            return [
+                ft.ListTile(
+                    title=ft.Text(path, size=14),
+                    on_click=lambda e, mid=mid, path=path: _on_timer_matter_select(mid, path),
+                )
+                for mid, path in flat
+            ]
+        by_client = _options_by_client_timer(options)
+        controls = []
+        for client_name in sorted(by_client.keys()):
+            items = by_client[client_name]
+            is_exp = client_name in timer_matter_expanded
+            controls.append(
+                ft.ListTile(
+                    title=ft.Text(client_name, weight=ft.FontWeight.W_500, size=14),
+                    subtitle=ft.Text(f"{len(items)} matter(s)", size=12),
+                    trailing=ft.Icon(ft.Icons.EXPAND_LESS if is_exp else ft.Icons.EXPAND_MORE, size=20),
+                    on_click=lambda e, c=client_name: _on_timer_matter_toggle(c),
+                ),
+            )
+            controls.append(
+                ft.Container(
+                    content=ft.Column(
+                        [
+                            ft.ListTile(
+                                title=ft.Text(path, size=14),
+                                on_click=lambda e, mid=mid, path=path: _on_timer_matter_select(mid, path),
+                            )
+                            for mid, path in items
+                        ],
+                    ),
+                    visible=is_exp,
+                    padding=ft.Padding.only(left=20),
+                ),
+            )
+        return controls
+
+    def _on_timer_matter_toggle(client_name: str):
+        timer_matter_expanded.symmetric_difference_update([client_name])
+        if timer_matter_list_ref.current:
+            timer_matter_list_ref.current.controls = _build_timer_matter_list(
+                timer_matter_search_ref.current.value if timer_matter_search_ref.current else ""
+            )
+            page.update()
+
+    def _on_timer_matter_select(mid: int, path: str):
+        timer_matter_selected[0], timer_matter_selected[1] = mid, path
+        if timer_matter_selection_ref.current:
+            timer_matter_selection_ref.current.value = f"Selected: {path}"
+        page.update()
+
+    def on_timer_matter_search(e):
+        if timer_matter_list_ref.current and timer_matter_search_ref.current:
+            timer_matter_list_ref.current.controls = _build_timer_matter_list(e.control.value or "")
+            page.update()
+
+    def refresh_timer_matter_list():
+        nonlocal options
+        options = get_matters_with_full_paths(for_timer=True)
+        if options and timer_matter_selected[0] not in [mid for mid, _ in options]:
+            timer_matter_selected[0], timer_matter_selected[1] = options[0][0], options[0][1]
+            if timer_matter_selection_ref.current:
+                timer_matter_selection_ref.current.value = f"Selected: {options[0][1]}"
+        if timer_matter_list_ref.current:
+            q = timer_matter_search_ref.current.value if timer_matter_search_ref.current else ""
+            timer_matter_list_ref.current.controls = _build_timer_matter_list(q)
+        page.update()
+
+    if page.data is None:
+        page.data = {}
+    page.data["refresh_timer_matters"] = refresh_timer_matter_list
+
+    description_ref = ft.Ref[ft.TextField]()
+    manual_desc_ref = ft.Ref[ft.TextField]()
+    manual_start_ref = ft.Ref[ft.TextField]()
+    manual_end_ref = ft.Ref[ft.TextField]()
+    manual_duration_ref = ft.Ref[ft.TextField]()
+    manual_derived_ref = ft.Ref[ft.Text]()
+    timer_mode_ref = ft.Ref[ft.SegmentedButton]()
+    timer_section_ref = ft.Ref[ft.Container]()
+    manual_section_ref = ft.Ref[ft.Container]()
     label = ft.Text(
         ref=timer_label,
         value="00:00:00",
@@ -71,14 +217,21 @@ def build_timer_tab(
                 timer_label.current.value = format_elapsed(elapsed)
                 page.update()
 
+    def _get_selected_matter_id() -> int | None:
+        """Return selected matter id from the matter list (same for timer and manual)."""
+        return timer_matter_selected[0]
+
     def on_start(_):
-        if not matter_dropdown.current or not matter_dropdown.current.value:
+        matter_id = _get_selected_matter_id()
+        if matter_id is None:
+            page.snack_bar = ft.SnackBar(ft.Text("Select a matter from the list."), open=True)
+            page.update()
             return
         if running_ref[0]:
             return
-        matter_id = int(matter_dropdown.current.value)
+        description = (description_ref.current.value or "").strip() if description_ref.current else ""
         try:
-            entry = start_timer(matter_id)
+            entry = start_timer(matter_id, description=description or None)
         except ValueError as e:
             page.snack_bar = ft.SnackBar(ft.Text(str(e)), open=True)
             page.update()
@@ -98,8 +251,127 @@ def build_timer_tab(
             timer_label.current.value = format_elapsed(entry.duration_seconds)
         page.update()
 
+    def _update_manual_derived(_=None):
+        """When two of Start/End/Duration are filled, compute and show the third."""
+        if not manual_derived_ref.current:
+            return
+        start_s = manual_start_ref.current.value if manual_start_ref.current else ""
+        end_s = manual_end_ref.current.value if manual_end_ref.current else ""
+        dur_s = manual_duration_ref.current.value if manual_duration_ref.current else ""
+        start_t, end_t, dur = _compute_third_time_static(start_s, end_s, dur_s)
+        if start_t is None or end_t is None or dur is None:
+            manual_derived_ref.current.value = "Fill exactly two of Start, End, Duration; the third will be shown here."
+        else:
+            manual_derived_ref.current.value = f"Derived: Start {format_datetime(start_t)}, End {format_datetime(end_t)}, Duration {format_elapsed(dur)}"
+        page.update()
+
+    def on_manual_add(_):
+        matter_id = _get_selected_matter_id()
+        if matter_id is None:
+            page.snack_bar = ft.SnackBar(ft.Text("Select a matter from the list."), open=True)
+            page.update()
+            return
+        desc = (manual_desc_ref.current.value or "").strip() if manual_desc_ref.current else ""
+        start_s = manual_start_ref.current.value if manual_start_ref.current else ""
+        end_s = manual_end_ref.current.value if manual_end_ref.current else ""
+        dur_s = manual_duration_ref.current.value if manual_duration_ref.current else ""
+        start_t, end_t, dur = _compute_third_time_static(start_s, end_s, dur_s)
+        if start_t is None or end_t is None or dur is None:
+            page.snack_bar = ft.SnackBar(ft.Text("Fill exactly two of Start, End, Duration."), open=True)
+            page.update()
+            return
+        try:
+            add_manual_time_entry(matter_id, desc, start_time=start_t, end_time=end_t, duration_seconds=dur)
+        except ValueError as err:
+            page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+            page.update()
+            return
+        if manual_desc_ref.current:
+            manual_desc_ref.current.value = ""
+        if manual_start_ref.current:
+            manual_start_ref.current.value = ""
+        if manual_end_ref.current:
+            manual_end_ref.current.value = ""
+        if manual_duration_ref.current:
+            manual_duration_ref.current.value = ""
+        _update_manual_derived()
+        page.snack_bar = ft.SnackBar(ft.Text("Manual entry added to selected matter."), open=True)
+        page.update()
+
     start_btn.on_click = on_start
     stop_btn.on_click = on_stop
+
+    def on_timer_mode_change(e):
+        selected = (e.control.selected or ["timer"])[0] if e.control.selected else "timer"
+        if timer_section_ref.current:
+            timer_section_ref.current.visible = selected == "timer"
+        if manual_section_ref.current:
+            manual_section_ref.current.visible = selected == "manual"
+        page.update()
+
+    timer_matter_list_initial = _build_timer_matter_list("")
+    matter_block = ft.Container(
+        content=ft.Column(
+            [
+                ft.TextField(
+                    ref=timer_matter_search_ref,
+                    label="Search matters by name or path",
+                    width=400,
+                    on_change=on_timer_matter_search,
+                ),
+                ft.Container(
+                    content=ft.Column(ref=timer_matter_list_ref, controls=timer_matter_list_initial, scroll=ft.ScrollMode.AUTO),
+                    height=180,
+                    border=ft.border.all(1, ft.Colors.OUTLINE),
+                    border_radius=4,
+                ),
+                ft.Text(
+                    ref=timer_matter_selection_ref,
+                    size=12,
+                    value=f"Selected: {timer_matter_selected[1]}" if timer_matter_selected[1] else "Select a matter below.",
+                ),
+                ft.Text("All time (timer and manual) is logged to the matter selected above.", size=12),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+        border=ft.border.all(1, ft.Colors.OUTLINE),
+        border_radius=4,
+        padding=12,
+    )
+
+    timer_section = ft.Container(
+        ref=timer_section_ref,
+        content=ft.Column(
+            [
+                ft.TextField(ref=description_ref, label="Task description (optional)", width=400),
+                ft.Container(height=24),
+                label,
+                ft.Container(height=24),
+                ft.Row([start_btn, stop_btn], spacing=12),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+        visible=True,
+    )
+
+    manual_section = ft.Container(
+        ref=manual_section_ref,
+        content=ft.Column(
+            [
+                ft.Text("Fill exactly two of Start, End, Duration; the third is derived below.", size=12),
+                ft.Container(height=8),
+                ft.TextField(ref=manual_desc_ref, label="Description (optional)", width=400),
+                ft.TextField(ref=manual_start_ref, label="Start (YYYY-MM-DD HH:MM)", width=400, on_change=_update_manual_derived),
+                ft.TextField(ref=manual_end_ref, label="End (YYYY-MM-DD HH:MM)", width=400, on_change=_update_manual_derived),
+                ft.TextField(ref=manual_duration_ref, label="Duration (hours, e.g. 1.5 or 1:30)", width=400, on_change=_update_manual_derived),
+                ft.Text(ref=manual_derived_ref, size=12, value="Fill exactly two of Start, End, Duration; the third will be shown here."),
+                ft.Container(height=8),
+                ft.ElevatedButton("Add manual entry", icon=ft.Icons.ADD, on_click=on_manual_add),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+        visible=False,
+    )
 
     timer_controls = [
         ft.Text("Timer", size=24, weight=ft.FontWeight.BOLD),
@@ -111,17 +383,29 @@ def build_timer_tab(
         )
         timer_controls.append(ft.Container(height=16))
     timer_controls.extend([
-        dropdown,
-        ft.Container(height=24),
-        label,
-        ft.Container(height=24),
-        ft.Row([start_btn, stop_btn], spacing=12),
+        matter_block,
+        ft.Container(height=12),
+        ft.Text("How do you want to log time?", size=14),
+        ft.Container(height=4),
+        ft.SegmentedButton(
+            ref=timer_mode_ref,
+            segments=[
+                ft.Segment(value="timer", label=ft.Text("Timer")),
+                ft.Segment(value="manual", label=ft.Text("Manual entry")),
+            ],
+            selected=["timer"],
+            on_change=on_timer_mode_change,
+        ),
+        ft.Container(height=12),
+        timer_section,
+        manual_section,
     ])
 
     return ft.Column(
         timer_controls,
         expand=True,
-        alignment=ft.MainAxisAlignment.CENTER,
+        scroll=ft.ScrollMode.AUTO,
+        alignment=ft.MainAxisAlignment.START,
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
     )
 
@@ -157,6 +441,22 @@ def build_matters_tab(
     merge_expanded: set = set()
     move_dialog_ref = ft.Ref[ft.AlertDialog]()
     merge_dialog_ref = ft.Ref[ft.AlertDialog]()
+
+    time_entries_matter_id: list = [None]
+    time_entries_path: list = [None]
+    time_entries_list_ref = ft.Ref[ft.Column]()
+    time_entries_dialog_ref = ft.Ref[ft.AlertDialog]()
+    edit_entry_id_ref: list = [None]
+    edit_desc_ref = ft.Ref[ft.TextField]()
+    edit_start_ref = ft.Ref[ft.TextField]()
+    edit_end_ref = ft.Ref[ft.TextField]()
+    edit_duration_ref = ft.Ref[ft.TextField]()
+    edit_entry_dialog_ref = ft.Ref[ft.AlertDialog]()
+    add_desc_ref = ft.Ref[ft.TextField]()
+    add_start_ref = ft.Ref[ft.TextField]()
+    add_end_ref = ft.Ref[ft.TextField]()
+    add_duration_ref = ft.Ref[ft.TextField]()
+    add_entry_dialog_ref = ft.Ref[ft.AlertDialog]()
 
     expanded_clients_matters: set[str] = set()
 
@@ -205,6 +505,10 @@ def build_matters_tab(
                                         ft.PopupMenuItem(
                                             content="Merge…",
                                             on_click=lambda e, m=mid, p=path: open_merge_dialog(m, p),
+                                        ),
+                                        ft.PopupMenuItem(
+                                            content="Time entries",
+                                            on_click=lambda e, m=mid, p=path: open_time_entries_dialog(m, p),
                                         ),
                                     ],
                                 ),
@@ -455,6 +759,135 @@ def build_matters_tab(
             merge_dialog_ref.current.open = False
         page.update()
 
+    def _build_time_entries_list_controls():
+        mid = time_entries_matter_id[0]
+        if mid is None:
+            return []
+        entries = get_time_entries_by_matter(mid)
+        controls = []
+        for entry in entries:
+            desc = (entry.description or "")[:40] + ("…" if (entry.description or "") and len(entry.description or "") > 40 else "")
+            end_str = format_datetime(entry.end_time) if entry.end_time else "Running"
+            dur_str = format_elapsed(entry.duration_seconds) if entry.duration_seconds else ("—" if entry.end_time else "—")
+            controls.append(
+                ft.ListTile(
+                    title=ft.Text(desc or "(no description)", size=14),
+                    subtitle=ft.Text(f"{format_datetime(entry.start_time)} → {end_str}  ·  {dur_str}", size=12),
+                    trailing=ft.IconButton(icon=ft.Icons.EDIT, on_click=lambda e, ent=entry: open_edit_entry_dialog(ent)),
+                ),
+            )
+        return controls
+
+    def refresh_time_entries_list():
+        if time_entries_list_ref.current:
+            time_entries_list_ref.current.controls = _build_time_entries_list_controls()
+            page.update()
+
+    def open_time_entries_dialog(mid: int, path: str):
+        time_entries_matter_id[0] = mid
+        time_entries_path[0] = path
+        if time_entries_dialog_ref.current:
+            time_entries_dialog_ref.current.title = ft.Text(f"Time entries: {path}")
+            time_entries_dialog_ref.current.open = True
+        if time_entries_list_ref.current:
+            time_entries_list_ref.current.controls = _build_time_entries_list_controls()
+        page.update()
+
+    def on_time_entries_add(_):
+        open_add_entry_dialog()
+
+    def open_edit_entry_dialog(entry):
+        edit_entry_id_ref[0] = entry.id
+        if edit_desc_ref.current:
+            edit_desc_ref.current.value = entry.description or ""
+        if edit_start_ref.current:
+            edit_start_ref.current.value = format_datetime(entry.start_time)
+        if edit_end_ref.current:
+            edit_end_ref.current.value = format_datetime(entry.end_time) if entry.end_time else ""
+        if edit_duration_ref.current:
+            edit_duration_ref.current.value = str(round((entry.duration_seconds or 0) / 3600, 2)) if entry.duration_seconds else ""
+        if edit_entry_dialog_ref.current:
+            edit_entry_dialog_ref.current.open = True
+        page.update()
+
+    def on_edit_entry_save(_):
+        eid = edit_entry_id_ref[0]
+        if eid is None:
+            return
+        desc = edit_desc_ref.current.value if edit_desc_ref.current else ""
+        start_s = edit_start_ref.current.value if edit_start_ref.current else ""
+        end_s = edit_end_ref.current.value if edit_end_ref.current else ""
+        dur_s = edit_duration_ref.current.value if edit_duration_ref.current else ""
+        start_t, end_t, dur = _compute_third_time_static(start_s, end_s, dur_s)
+        if start_t is None or end_t is None or dur is None:
+            page.snack_bar = ft.SnackBar(ft.Text("Fill exactly two of Start, End, Duration."), open=True)
+            page.update()
+            return
+        try:
+            update_time_entry(eid, description=desc.strip(), start_time=start_t, end_time=end_t, duration_seconds=dur)
+        except ValueError as err:
+            page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+            page.update()
+            return
+        if edit_entry_dialog_ref.current:
+            edit_entry_dialog_ref.current.open = False
+        refresh_time_entries_list()
+        page.snack_bar = ft.SnackBar(ft.Text("Entry updated."), open=True)
+        page.update()
+
+    def on_edit_entry_cancel(_):
+        if edit_entry_dialog_ref.current:
+            edit_entry_dialog_ref.current.open = False
+        page.update()
+
+    def open_add_entry_dialog():
+        if add_desc_ref.current:
+            add_desc_ref.current.value = ""
+        if add_start_ref.current:
+            add_start_ref.current.value = ""
+        if add_end_ref.current:
+            add_end_ref.current.value = ""
+        if add_duration_ref.current:
+            add_duration_ref.current.value = ""
+        if add_entry_dialog_ref.current:
+            add_entry_dialog_ref.current.open = True
+        page.update()
+
+    def on_add_entry_save(_):
+        mid = time_entries_matter_id[0]
+        if mid is None:
+            return
+        desc = (add_desc_ref.current.value or "").strip() if add_desc_ref.current else ""
+        start_s = add_start_ref.current.value if add_start_ref.current else ""
+        end_s = add_end_ref.current.value if add_end_ref.current else ""
+        dur_s = add_duration_ref.current.value if add_duration_ref.current else ""
+        start_t, end_t, dur = _compute_third_time_static(start_s, end_s, dur_s)
+        if start_t is None or end_t is None or dur is None:
+            page.snack_bar = ft.SnackBar(ft.Text("Fill exactly two of Start, End, Duration."), open=True)
+            page.update()
+            return
+        try:
+            add_manual_time_entry(mid, desc, start_time=start_t, end_time=end_t, duration_seconds=dur)
+        except ValueError as err:
+            page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+            page.update()
+            return
+        if add_entry_dialog_ref.current:
+            add_entry_dialog_ref.current.open = False
+        refresh_time_entries_list()
+        page.snack_bar = ft.SnackBar(ft.Text("Entry added."), open=True)
+        page.update()
+
+    def on_add_entry_cancel(_):
+        if add_entry_dialog_ref.current:
+            add_entry_dialog_ref.current.open = False
+        page.update()
+
+    def on_time_entries_close(_):
+        if time_entries_dialog_ref.current:
+            time_entries_dialog_ref.current.open = False
+        page.update()
+
     def refresh_list():
         by_client = _by_client()
         if list_ref.current:
@@ -648,8 +1081,76 @@ def build_matters_tab(
             scroll=ft.ScrollMode.AUTO,
         ),
     )
+    time_entries_dialog = ft.AlertDialog(
+        ref=time_entries_dialog_ref,
+        title=ft.Text("Time entries"),
+        content=ft.Column(
+            [
+                ft.Container(
+                    content=ft.Column(ref=time_entries_list_ref, scroll=ft.ScrollMode.AUTO),
+                    height=280,
+                    border=ft.border.all(1, ft.Colors.OUTLINE),
+                    border_radius=4,
+                ),
+                ft.Row(
+                    [
+                        ft.ElevatedButton("Add entry", icon=ft.Icons.ADD, on_click=on_time_entries_add),
+                        ft.OutlinedButton("Close", on_click=on_time_entries_close),
+                    ],
+                    spacing=12,
+                ),
+            ],
+            tight=True,
+            scroll=ft.ScrollMode.AUTO,
+        ),
+    )
+    edit_entry_dialog = ft.AlertDialog(
+        ref=edit_entry_dialog_ref,
+        title=ft.Text("Edit time entry"),
+        content=ft.Column(
+            [
+                ft.TextField(ref=edit_desc_ref, label="Description", width=400),
+                ft.TextField(ref=edit_start_ref, label="Start (YYYY-MM-DD HH:MM)", width=400),
+                ft.TextField(ref=edit_end_ref, label="End (YYYY-MM-DD HH:MM)", width=400),
+                ft.TextField(ref=edit_duration_ref, label="Duration (hours, e.g. 1.5 or 1:30)", width=400),
+                ft.Text("Fill exactly two of Start, End, Duration; the third is computed.", size=12),
+                ft.Row(
+                    [
+                        ft.ElevatedButton("Save", on_click=on_edit_entry_save),
+                        ft.OutlinedButton("Cancel", on_click=on_edit_entry_cancel),
+                    ],
+                    spacing=12,
+                ),
+            ],
+            tight=True,
+        ),
+    )
+    add_entry_dialog = ft.AlertDialog(
+        ref=add_entry_dialog_ref,
+        title=ft.Text("Add time entry"),
+        content=ft.Column(
+            [
+                ft.TextField(ref=add_desc_ref, label="Description", width=400),
+                ft.TextField(ref=add_start_ref, label="Start (YYYY-MM-DD HH:MM)", width=400),
+                ft.TextField(ref=add_end_ref, label="End (YYYY-MM-DD HH:MM)", width=400),
+                ft.TextField(ref=add_duration_ref, label="Duration (hours, e.g. 1.5 or 1:30)", width=400),
+                ft.Text("Fill exactly two of Start, End, Duration; the third is computed.", size=12),
+                ft.Row(
+                    [
+                        ft.ElevatedButton("Add", on_click=on_add_entry_save),
+                        ft.OutlinedButton("Cancel", on_click=on_add_entry_cancel),
+                    ],
+                    spacing=12,
+                ),
+            ],
+            tight=True,
+        ),
+    )
     page.overlay.append(move_dialog)
     page.overlay.append(merge_dialog)
+    page.overlay.append(time_entries_dialog)
+    page.overlay.append(edit_entry_dialog)
+    page.overlay.append(add_entry_dialog)
 
     return ft.Column(
         [
@@ -800,7 +1301,7 @@ def main(page: ft.Page) -> None:
     page.padding = 24
 
     timer_label_ref: ft.Ref[ft.Text] = ft.Ref()
-    matter_dropdown_ref: ft.Ref[ft.Dropdown] = ft.Ref()
+    matter_dropdown_ref: ft.Ref[ft.Column] = ft.Ref()
     running_ref: list[bool] = [False]
     start_time_ref: list[datetime | None] = [None]
     matters_list_ref: ft.Ref[ft.Column] = ft.Ref()
@@ -811,13 +1312,9 @@ def main(page: ft.Page) -> None:
     )
 
     def refresh_timer_dropdown():
-        if matter_dropdown_ref.current:
-            opts = get_matters_with_full_paths(for_timer=True)
-            matter_dropdown_ref.current.options = [
-                ft.DropdownOption(key=str(mid), text=path) for mid, path in opts
-            ]
-            if opts and not matter_dropdown_ref.current.value:
-                matter_dropdown_ref.current.value = str(opts[0][0])
+        refresh = (page.data or {}).get("refresh_timer_matters")
+        if refresh:
+            refresh()
 
     matters_tab = build_matters_tab(page, matters_list_ref, refresh_timer_dropdown)
 
@@ -837,13 +1334,9 @@ def main(page: ft.Page) -> None:
 
     def show_timer(_):
         body_ref.current.content = timer_container
-        if matter_dropdown_ref.current:
-            opts = get_matters_with_full_paths(for_timer=True)
-            matter_dropdown_ref.current.options = [
-                ft.DropdownOption(key=str(mid), text=path) for mid, path in opts
-            ]
-            if opts and not matter_dropdown_ref.current.value:
-                matter_dropdown_ref.current.value = str(opts[0][0])
+        refresh = (page.data or {}).get("refresh_timer_matters")
+        if refresh:
+            refresh()
         page.update()
 
     def show_matters(_):
