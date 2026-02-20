@@ -369,9 +369,19 @@ class SentinelApp:
             page.snack_bar = ft.SnackBar(ft.Text("Start time updated."), open=True)
             page.update()
 
+        def on_description_blur(_):
+            """When description field loses focus and timer is running, save to the time entry."""
+            if running_ref[0] and description_ref.current:
+                desc = (description_ref.current.value or "").strip()
+                self.db.update_running_entry_description(desc)
+
         def on_stop(_):
             if not running_ref[0]:
                 return
+            # Save current description to the running entry before stopping
+            if description_ref.current:
+                desc = (description_ref.current.value or "").strip()
+                self.db.update_running_entry_description(desc)
             running_ref[0] = False
             if start_time_section_ref.current:
                 start_time_section_ref.current.visible = False
@@ -489,7 +499,12 @@ class SentinelApp:
             ref=timer_section_ref,
             content=ft.Column(
                 [
-                    ft.TextField(ref=description_ref, label="Task description (optional)", width=400),
+                    ft.TextField(
+                        ref=description_ref,
+                        label="Task description (optional)",
+                        width=400,
+                        on_blur=on_description_blur,
+                    ),
                     ft.Container(height=24),
                     label,
                     ft.Container(height=12),

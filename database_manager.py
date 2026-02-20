@@ -160,6 +160,21 @@ class DatabaseManager:
             session.refresh(entry)
             return entry
 
+    def update_running_entry_description(self, description: str) -> bool:
+        """Update the current running entry's description. Returns True if updated."""
+        with self._session() as session:
+            entry = (
+                session.query(TimeEntry)
+                .filter(TimeEntry.end_time.is_(None))
+                .order_by(TimeEntry.start_time.desc())
+                .first()
+            )
+            if not entry:
+                return False
+            entry.description = description or ""
+            session.commit()
+            return True
+
     def get_time_entries_by_matter(self, matter_id: int) -> list[TimeEntry]:
         """Return all time entries for the matter, newest first."""
         with self._session() as session:
