@@ -34,10 +34,14 @@ def add_matter(name: str, matter_code: str, parent_id: int | None = None) -> Mat
         return matter
 
 
-def get_matters_with_full_paths() -> list[tuple[int, str]]:
-    """Return list of (matter_id, full_path) for dropdown, using Matter.get_full_path()."""
+def get_matters_with_full_paths(for_timer: bool = False) -> list[tuple[int, str]]:
+    """Return list of (matter_id, full_path) for dropdown, using Matter.get_full_path().
+    When for_timer=True, only matters with a parent (non-root) are returned."""
     with get_session() as session:
-        matters = session.query(Matter).order_by(Matter.matter_code).all()
+        q = session.query(Matter).order_by(Matter.matter_code)
+        if for_timer:
+            q = q.filter(Matter.parent_id.isnot(None))
+        matters = q.all()
         return [(m.id, m.get_full_path(session)) for m in matters]
 
 
@@ -48,8 +52,14 @@ def get_all_matters() -> list[Matter]:
 
 
 def start_timer(matter_id: int, description: str | None = None) -> TimeEntry:
-    """Start a new time entry for the given matter. Returns the created TimeEntry."""
+    """Start a new time entry for the given matter. Returns the created TimeEntry.
+    Raises ValueError if matter is a root (client); time can only be logged to a matter under a client."""
     with get_session() as session:
+        matter = session.query(Matter).get(matter_id)
+        if matter is None:
+            raise ValueError("Matter not found.")
+        if matter.parent_id is None:
+            raise ValueError("Time cannot be logged to a client; select a matter under a client.")
         entry = TimeEntry(matter_id=matter_id, description=description or "")
         session.add(entry)
         session.commit()

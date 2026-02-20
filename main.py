@@ -32,8 +32,9 @@ def build_timer_tab(
     running_ref: list[bool],
     start_time_ref: list[datetime | None],
 ) -> ft.Control:
-    """Build the Timer tab: dropdown (full path), Start/Stop, live-updating label."""
-    options = get_matters_with_full_paths()
+    """Build the Timer tab: dropdown (full path), Start/Stop, live-updating label.
+    Only matters under a client are shown (no time on client/root)."""
+    options = get_matters_with_full_paths(for_timer=True)
     dropdown = ft.Dropdown(
         ref=matter_dropdown,
         label="Matter",
@@ -66,7 +67,12 @@ def build_timer_tab(
         if running_ref[0]:
             return
         matter_id = int(matter_dropdown.current.value)
-        entry = start_timer(matter_id)
+        try:
+            entry = start_timer(matter_id)
+        except ValueError as e:
+            page.snack_bar = ft.SnackBar(ft.Text(str(e)), open=True)
+            page.update()
+            return
         start_time_ref[0] = entry.start_time
         running_ref[0] = True
         timer_label.current.value = "00:00:00"
@@ -85,16 +91,20 @@ def build_timer_tab(
     start_btn.on_click = on_start
     stop_btn.on_click = on_stop
 
+    # When no matters under a client exist, show message instead of dropdown
+    timer_controls = [
+        ft.Text("Timer", size=24, weight=ft.FontWeight.BOLD),
+        ft.Container(height=16),
+    ]
+    if options:
+        timer_controls.extend([dropdown, ft.Container(height=24), label, ft.Container(height=24), ft.Row([start_btn, stop_btn], spacing=12)])
+    else:
+        timer_controls.append(
+            ft.Text("Add at least one matter under a client to log time.", size=14)
+        )
+
     return ft.Column(
-        [
-            ft.Text("Timer", size=24, weight=ft.FontWeight.BOLD),
-            ft.Container(height=16),
-            dropdown,
-            ft.Container(height=24),
-            label,
-            ft.Container(height=24),
-            ft.Row([start_btn, stop_btn], spacing=12),
-        ],
+        timer_controls,
         expand=True,
         alignment=ft.MainAxisAlignment.CENTER,
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -258,7 +268,7 @@ def main(page: ft.Page) -> None:
     def show_timer(_):
         body_ref.current.content = timer_container
         if matter_dropdown_ref.current:
-            opts = get_matters_with_full_paths()
+            opts = get_matters_with_full_paths(for_timer=True)
             matter_dropdown_ref.current.options = [
                 ft.DropdownOption(key=str(mid), text=path) for mid, path in opts
             ]
