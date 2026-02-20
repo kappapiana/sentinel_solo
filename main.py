@@ -419,7 +419,6 @@ def build_matters_tab(
     List shows clients first (collapsed); click to expand and see matters. Search shows ~6 matches.
     on_matters_changed is called after move/merge to refresh e.g. the timer dropdown."""
     name_field = ft.Ref[ft.TextField]()
-    code_field = ft.Ref[ft.TextField]()
     parent_dropdown = ft.Ref[ft.Dropdown]()
     add_type_ref = ft.Ref[ft.SegmentedButton]()
     parent_section_ref = ft.Ref[ft.Container]()
@@ -895,16 +894,14 @@ def build_matters_tab(
             page.update()
 
     def on_add(_):
-        if not name_field.current or not code_field.current:
+        if not name_field.current:
             return
-        n = name_field.current.value or ""
-        c = (code_field.current.value or "").strip()
-        if not c:
-            c = suggest_unique_code(n)
-        if not n.strip():
+        n = (name_field.current.value or "").strip()
+        if not n:
             page.snack_bar = ft.SnackBar(ft.Text("Name is required."), open=True)
             page.update()
             return
+        c = suggest_unique_code(n)
         is_client = True
         if add_type_ref.current and add_type_ref.current.selected:
             is_client = add_type_ref.current.selected[0] == "client"
@@ -924,16 +921,15 @@ def build_matters_tab(
                 page.update()
                 return
         try:
-            add_matter(name=n.strip(), matter_code=c.strip(), parent_id=pid)
+            add_matter(name=n, matter_code=c, parent_id=pid)
         except IntegrityError:
             page.snack_bar = ft.SnackBar(
-                ft.Text("A matter with this code already exists. Use a unique Matter code."),
+                ft.Text("A matter with this name already exists or could not generate a unique code."),
                 open=True,
             )
             page.update()
             return
         name_field.current.value = ""
-        code_field.current.value = ""
         if parent_dropdown.current:
             parent_dropdown.current.value = None
         refresh_list()
@@ -1161,7 +1157,6 @@ def build_matters_tab(
             add_type_button,
             ft.Container(height=16),
             ft.TextField(ref=name_field, label="Name", width=400),
-            ft.TextField(ref=code_field, label="Code (optional; auto-generated from name if empty)", width=400),
             parent_section,
             ft.Container(height=8),
             ft.ElevatedButton("Add", icon=ft.Icons.ADD, on_click=on_add),
