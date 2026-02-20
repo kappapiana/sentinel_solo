@@ -44,6 +44,8 @@ def build_timer_tab(
         width=400,
         options=[ft.DropdownOption(key=str(mid), text=path) for mid, path in options],
         value=str(options[0][0]) if options else None,
+        enable_filter=True,
+        editable=True,
     )
     label = ft.Text(
         ref=timer_label,
