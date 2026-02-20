@@ -4,3 +4,4 @@
 - **Structure:** Split logic into models.py, database_manager.py, and main.py.
 - **Matter Logic:** Matters support infinite nesting (Parent-Child). Always use the `get_full_path()` helper for UI labels.
 - **Style:** Modern Dark Theme.
+- **Regression**: be careful not to introduce regression.
