@@ -1,6 +1,7 @@
 """
 Database manager for Sentinel Solo: matters and time entries.
 """
+import re
 from pathlib import Path
 from datetime import datetime, date
 
@@ -22,6 +23,29 @@ def init_db() -> None:
 def get_session() -> Session:
     """Return a new session (caller should close or use as context)."""
     return SessionLocal()
+
+
+def _slugify(name: str) -> str:
+    """Lowercase, replace non-alphanumeric with hyphen, strip. Empty -> 'matter'."""
+    s = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
+    return s if s else "matter"
+
+
+def suggest_unique_code(name: str) -> str:
+    """Return a unique matter_code from name: slugify, then slug, slug-2, slug-3, ... as needed."""
+    slug = _slugify(name)
+    with get_session() as session:
+        # Codes that are exactly slug or slug-N
+        rows = session.query(Matter.matter_code).filter(
+            (Matter.matter_code == slug) | (Matter.matter_code.like(f"{slug}-%"))
+        ).all()
+        used = {r[0] for r in rows}
+    if slug not in used:
+        return slug
+    n = 2
+    while f"{slug}-{n}" in used:
+        n += 1
+    return f"{slug}-{n}"
 
 
 def add_matter(name: str, matter_code: str, parent_id: int | None = None) -> Matter:

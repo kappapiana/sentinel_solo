@@ -18,6 +18,7 @@ from database_manager import (
     get_matters_with_full_paths,
     get_all_matters,
     get_time_by_client_and_matter,
+    suggest_unique_code,
 )
 
 
@@ -193,9 +194,11 @@ def build_matters_tab(page: ft.Page, list_ref: ft.Ref[ft.Column]) -> ft.Control:
         if not name_field.current or not code_field.current:
             return
         n = name_field.current.value or ""
-        c = code_field.current.value or ""
-        if not n.strip() or not c.strip():
-            page.snack_bar = ft.SnackBar(ft.Text("Name and code are required."), open=True)
+        c = (code_field.current.value or "").strip()
+        if not c:
+            c = suggest_unique_code(n)
+        if not n.strip():
+            page.snack_bar = ft.SnackBar(ft.Text("Name is required."), open=True)
             page.update()
             return
         is_client = True
@@ -322,7 +325,7 @@ def build_matters_tab(page: ft.Page, list_ref: ft.Ref[ft.Column]) -> ft.Control:
             add_type_button,
             ft.Container(height=16),
             ft.TextField(ref=name_field, label="Name", width=400),
-            ft.TextField(ref=code_field, label="Code", width=400),
+            ft.TextField(ref=code_field, label="Code (optional; auto-generated from name if empty)", width=400),
             parent_section,
             ft.Container(height=8),
             ft.ElevatedButton("Add", icon=ft.Icons.ADD, on_click=on_add),
