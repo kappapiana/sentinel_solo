@@ -1,0 +1,6 @@
+# Sentinel Solo: Project Rules
+- **Environment:** Ubuntu 24.04 using a virtual environment (./venv).
+- **Tech Stack:** Python 3.12, Flet (GUI), SQLAlchemy (SQLite).
+- **Structure:** Split logic into models.py, database_manager.py, and main.py.
+- **Matter Logic:** Matters support infinite nesting (Parent-Child). Always use the `get_full_path()` helper for UI labels.
+- **Style:** Modern Dark Theme.
