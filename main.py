@@ -16,9 +16,12 @@ from database_manager import (
     start_timer,
     stop_timer,
     get_matters_with_full_paths,
+    get_matters_with_full_paths_excluding,
     get_all_matters,
     get_time_by_client_and_matter,
     suggest_unique_code,
+    move_matter,
+    merge_matter_into,
 )
 
 
@@ -123,15 +126,37 @@ def build_timer_tab(
     )
 
 
-def build_matters_tab(page: ft.Page, list_ref: ft.Ref[ft.Column]) -> ft.Control:
+def build_matters_tab(
+    page: ft.Page,
+    list_ref: ft.Ref[ft.Column],
+    on_matters_changed: Callable[[], None] | None = None,
+) -> ft.Control:
     """Build the Manage Matters tab: add Clients (root) or Matters (under a client/parent).
-    List shows clients first (collapsed); click to expand and see matters. Search shows ~6 matches."""
+    List shows clients first (collapsed); click to expand and see matters. Search shows ~6 matches.
+    on_matters_changed is called after move/merge to refresh e.g. the timer dropdown."""
     name_field = ft.Ref[ft.TextField]()
     code_field = ft.Ref[ft.TextField]()
     parent_dropdown = ft.Ref[ft.Dropdown]()
     add_type_ref = ft.Ref[ft.SegmentedButton]()
     parent_section_ref = ft.Ref[ft.Container]()
     search_results_ref = ft.Ref[ft.Column]()
+
+    move_source: list = [None, None]
+    merge_source: list = [None, None]
+    move_options_data: list = []  # list of (id_or_None, path) set when dialog opens
+    merge_options_data: list = []
+    move_selected_ref: list = [None]  # (id_or_None, path)
+    merge_selected_ref: list = [None]  # (id, path)
+    move_search_ref = ft.Ref[ft.TextField]()
+    merge_search_ref = ft.Ref[ft.TextField]()
+    move_list_ref = ft.Ref[ft.Column]()
+    merge_list_ref = ft.Ref[ft.Column]()
+    move_selection_text_ref = ft.Ref[ft.Text]()
+    merge_selection_text_ref = ft.Ref[ft.Text]()
+    move_expanded: set = set()
+    merge_expanded: set = set()
+    move_dialog_ref = ft.Ref[ft.AlertDialog]()
+    merge_dialog_ref = ft.Ref[ft.AlertDialog]()
 
     expanded_clients_matters: set[str] = set()
 
@@ -170,8 +195,21 @@ def build_matters_tab(page: ft.Page, list_ref: ft.Ref[ft.Column]) -> ft.Control:
                             ft.ListTile(
                                 title=ft.Text(path, size=14),
                                 subtitle=ft.Text(code, size=12),
+                                trailing=ft.PopupMenuButton(
+                                    icon=ft.Icons.MORE_VERT,
+                                    items=[
+                                        ft.PopupMenuItem(
+                                            content="Move…",
+                                            on_click=lambda e, m=mid, p=path: open_move_dialog(m, p),
+                                        ),
+                                        ft.PopupMenuItem(
+                                            content="Merge…",
+                                            on_click=lambda e, m=mid, p=path: open_merge_dialog(m, p),
+                                        ),
+                                    ],
+                                ),
                             )
-                            for _, path, code in items
+                            for mid, path, code in items
                         ],
                     ),
                     visible=is_expanded,
@@ -183,6 +221,239 @@ def build_matters_tab(page: ft.Page, list_ref: ft.Ref[ft.Column]) -> ft.Control:
     def _on_toggle_client(client_name: str):
         expanded_clients_matters.symmetric_difference_update([client_name])
         refresh_list()
+
+    def _options_by_client(options: list, include_root: bool) -> dict:
+        """Group (id, path) options by client (first path segment). Root option in key '— Root (new client) —'."""
+        by_client = defaultdict(list)
+        if include_root and options and options[0][0] is None:
+            by_client["— Root (new client) —"].append(options[0])
+            options = options[1:]
+        for pid, ptext in options:
+            client = ptext.split(" > ")[0] if " > " in ptext else ptext
+            by_client[client].append((pid, ptext))
+        for client in by_client:
+            by_client[client].sort(key=lambda x: x[1])
+        return by_client
+
+    def _build_move_list_controls(query: str):
+        by_client = _options_by_client(move_options_data, include_root=True)
+        q = (query or "").strip().lower()
+        if q:
+            flat = [(pid, ptext) for pid, ptext in move_options_data if ptext and q in ptext.lower()][:15]
+            return [
+                ft.ListTile(
+                    title=ft.Text(ptext, size=14),
+                    data=(pid, ptext),
+                    selected=move_selected_ref[0] == (pid, ptext),
+                    on_click=lambda e, pid=pid, ptext=ptext: _on_move_select(pid, ptext),
+                )
+                for pid, ptext in flat
+            ]
+        controls = []
+        for client_name in sorted(by_client.keys()):
+            items = by_client[client_name]
+            is_exp = client_name in move_expanded
+            controls.append(
+                ft.ListTile(
+                    title=ft.Text(client_name, weight=ft.FontWeight.W_500, size=14),
+                    subtitle=ft.Text(f"{len(items)} matter(s)", size=12),
+                    trailing=ft.Icon(ft.Icons.EXPAND_LESS if is_exp else ft.Icons.EXPAND_MORE, size=20),
+                    on_click=lambda e, c=client_name: _on_toggle_move_expanded(c),
+                ),
+            )
+            controls.append(
+                ft.Container(
+                    content=ft.Column(
+                        [
+                            ft.ListTile(
+                                title=ft.Text(ptext, size=14),
+                                data=(pid, ptext),
+                                selected=move_selected_ref[0] == (pid, ptext),
+                                on_click=lambda e, pid=pid, ptext=ptext: _on_move_select(pid, ptext),
+                            )
+                            for pid, ptext in items
+                        ],
+                    ),
+                    visible=is_exp,
+                    padding=ft.Padding.only(left=20),
+                ),
+            )
+        return controls
+
+    def _on_toggle_move_expanded(client_name: str):
+        move_expanded.symmetric_difference_update([client_name])
+        if move_list_ref.current:
+            move_list_ref.current.controls = _build_move_list_controls(move_search_ref.current.value if move_search_ref.current else "")
+            page.update()
+
+    def _on_move_select(pid, ptext):
+        move_selected_ref[0] = (pid, ptext)
+        if move_selection_text_ref.current:
+            move_selection_text_ref.current.value = f"Selected: {ptext}"
+        if move_list_ref.current:
+            move_list_ref.current.controls = _build_move_list_controls(move_search_ref.current.value if move_search_ref.current else "")
+            page.update()
+
+    def _build_merge_list_controls(query: str):
+        by_client = _options_by_client(merge_options_data, include_root=False)
+        q = (query or "").strip().lower()
+        if q:
+            flat = [(pid, ptext) for pid, ptext in merge_options_data if ptext and q in ptext.lower()][:15]
+            return [
+                ft.ListTile(
+                    title=ft.Text(ptext, size=14),
+                    data=(pid, ptext),
+                    selected=merge_selected_ref[0] == (pid, ptext),
+                    on_click=lambda e, pid=pid, ptext=ptext: _on_merge_select(pid, ptext),
+                )
+                for pid, ptext in flat
+            ]
+        controls = []
+        for client_name in sorted(by_client.keys()):
+            items = by_client[client_name]
+            is_exp = client_name in merge_expanded
+            controls.append(
+                ft.ListTile(
+                    title=ft.Text(client_name, weight=ft.FontWeight.W_500, size=14),
+                    subtitle=ft.Text(f"{len(items)} matter(s)", size=12),
+                    trailing=ft.Icon(ft.Icons.EXPAND_LESS if is_exp else ft.Icons.EXPAND_MORE, size=20),
+                    on_click=lambda e, c=client_name: _on_toggle_merge_expanded(c),
+                ),
+            )
+            controls.append(
+                ft.Container(
+                    content=ft.Column(
+                        [
+                            ft.ListTile(
+                                title=ft.Text(ptext, size=14),
+                                data=(pid, ptext),
+                                selected=merge_selected_ref[0] == (pid, ptext),
+                                on_click=lambda e, pid=pid, ptext=ptext: _on_merge_select(pid, ptext),
+                            )
+                            for pid, ptext in items
+                        ],
+                    ),
+                    visible=is_exp,
+                    padding=ft.Padding.only(left=20),
+                ),
+            )
+        return controls
+
+    def _on_toggle_merge_expanded(client_name: str):
+        merge_expanded.symmetric_difference_update([client_name])
+        if merge_list_ref.current:
+            merge_list_ref.current.controls = _build_merge_list_controls(merge_search_ref.current.value if merge_search_ref.current else "")
+            page.update()
+
+    def _on_merge_select(pid, ptext):
+        merge_selected_ref[0] = (pid, ptext)
+        if merge_selection_text_ref.current:
+            merge_selection_text_ref.current.value = f"Selected: {ptext}"
+        if merge_list_ref.current:
+            merge_list_ref.current.controls = _build_merge_list_controls(merge_search_ref.current.value if merge_search_ref.current else "")
+            page.update()
+
+    def on_move_search(e):
+        if move_list_ref.current and move_search_ref.current:
+            move_list_ref.current.controls = _build_move_list_controls(e.control.value or "")
+            page.update()
+
+    def on_merge_search(e):
+        if merge_list_ref.current and merge_search_ref.current:
+            merge_list_ref.current.controls = _build_merge_list_controls(e.control.value or "")
+            page.update()
+
+    def open_move_dialog(mid: int, path: str):
+        move_source[0], move_source[1] = mid, path
+        move_options_data[:] = get_matters_with_full_paths_excluding(mid, include_root_option=True)
+        first = (move_options_data[0][0], move_options_data[0][1]) if move_options_data else (None, "")
+        move_selected_ref[0] = first
+        move_expanded.clear()
+        if move_dialog_ref.current:
+            move_dialog_ref.current.title = ft.Text(f"Move '{path}' to")
+            move_dialog_ref.current.open = True
+        if move_search_ref.current:
+            move_search_ref.current.value = ""
+        if move_selection_text_ref.current:
+            move_selection_text_ref.current.value = f"Selected: {first[1]}"
+        if move_list_ref.current:
+            move_list_ref.current.controls = _build_move_list_controls("")
+        page.update()
+
+    def on_move_confirm(_):
+        sel = move_selected_ref[0]
+        if sel is None or move_source[0] is None:
+            return
+        new_parent_id = sel[0]
+        try:
+            move_matter(move_source[0], new_parent_id)
+        except ValueError as err:
+            page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+            page.update()
+            return
+        if move_dialog_ref.current:
+            move_dialog_ref.current.open = False
+        refresh_list()
+        if parent_dropdown.current:
+            path_options = get_matters_with_full_paths()
+            parent_dropdown.current.options = [
+                ft.DropdownOption(key=str(mid), text=path) for mid, path in path_options
+            ]
+        if on_matters_changed:
+            on_matters_changed()
+        page.snack_bar = ft.SnackBar(ft.Text("Matter moved."), open=True)
+        page.update()
+
+    def on_move_cancel(_):
+        if move_dialog_ref.current:
+            move_dialog_ref.current.open = False
+        page.update()
+
+    def open_merge_dialog(mid: int, path: str):
+        merge_source[0], merge_source[1] = mid, path
+        merge_options_data[:] = get_matters_with_full_paths_excluding(mid, include_root_option=False)
+        first = (merge_options_data[0][0], merge_options_data[0][1]) if merge_options_data else (None, "")
+        merge_selected_ref[0] = first
+        merge_expanded.clear()
+        if merge_dialog_ref.current:
+            merge_dialog_ref.current.title = ft.Text(f"Merge '{path}' into")
+            merge_dialog_ref.current.open = True
+        if merge_search_ref.current:
+            merge_search_ref.current.value = ""
+        if merge_selection_text_ref.current:
+            merge_selection_text_ref.current.value = f"Selected: {first[1]}"
+        if merge_list_ref.current:
+            merge_list_ref.current.controls = _build_merge_list_controls("")
+        page.update()
+
+    def on_merge_confirm(_):
+        sel = merge_selected_ref[0]
+        if sel is None or merge_source[0] is None:
+            return
+        target_id = sel[0]
+        try:
+            merge_matter_into(merge_source[0], target_id)
+        except ValueError as err:
+            page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+            page.update()
+            return
+        if merge_dialog_ref.current:
+            merge_dialog_ref.current.open = False
+        refresh_list()
+        if parent_dropdown.current:
+            path_options = get_matters_with_full_paths()
+            parent_dropdown.current.options = [
+                ft.DropdownOption(key=str(mid), text=path) for mid, path in path_options
+            ]
+        if on_matters_changed:
+            on_matters_changed()
+        page.snack_bar = ft.SnackBar(ft.Text("Matters merged."), open=True)
+        page.update()
+
+    def on_merge_cancel(_):
+        if merge_dialog_ref.current:
+            merge_dialog_ref.current.open = False
+        page.update()
 
     def refresh_list():
         by_client = _by_client()
@@ -315,6 +586,70 @@ def build_matters_tab(page: ft.Page, list_ref: ft.Ref[ft.Column]) -> ft.Control:
         expand=True,
         controls=_build_list_controls(by_client_initial),
     )
+
+    move_dialog = ft.AlertDialog(
+        ref=move_dialog_ref,
+        title=ft.Text("Move matter to"),
+        content=ft.Column(
+            [
+                ft.TextField(
+                    ref=move_search_ref,
+                    label="Search by name or path",
+                    width=400,
+                    on_change=on_move_search,
+                ),
+                ft.Container(
+                    content=ft.Column(ref=move_list_ref, scroll=ft.ScrollMode.AUTO),
+                    height=220,
+                    border=ft.border.all(1, ft.Colors.OUTLINE),
+                    border_radius=4,
+                ),
+                ft.Text(ref=move_selection_text_ref, size=12, value="Selected: —"),
+                ft.Row(
+                    [
+                        ft.ElevatedButton("Move", on_click=on_move_confirm),
+                        ft.OutlinedButton("Cancel", on_click=on_move_cancel),
+                    ],
+                    spacing=12,
+                ),
+            ],
+            tight=True,
+            scroll=ft.ScrollMode.AUTO,
+        ),
+    )
+    merge_dialog = ft.AlertDialog(
+        ref=merge_dialog_ref,
+        title=ft.Text("Merge matter into"),
+        content=ft.Column(
+            [
+                ft.TextField(
+                    ref=merge_search_ref,
+                    label="Search by name or path",
+                    width=400,
+                    on_change=on_merge_search,
+                ),
+                ft.Container(
+                    content=ft.Column(ref=merge_list_ref, scroll=ft.ScrollMode.AUTO),
+                    height=220,
+                    border=ft.border.all(1, ft.Colors.OUTLINE),
+                    border_radius=4,
+                ),
+                ft.Text(ref=merge_selection_text_ref, size=12, value="Selected: —"),
+                ft.Text("All time and sub-matters will be moved.", size=12),
+                ft.Row(
+                    [
+                        ft.ElevatedButton("Merge", on_click=on_merge_confirm),
+                        ft.OutlinedButton("Cancel", on_click=on_merge_cancel),
+                    ],
+                    spacing=12,
+                ),
+            ],
+            tight=True,
+            scroll=ft.ScrollMode.AUTO,
+        ),
+    )
+    page.overlay.append(move_dialog)
+    page.overlay.append(merge_dialog)
 
     return ft.Column(
         [
@@ -474,7 +809,17 @@ def main(page: ft.Page) -> None:
     timer_tab = build_timer_tab(
         page, timer_label_ref, matter_dropdown_ref, running_ref, start_time_ref
     )
-    matters_tab = build_matters_tab(page, matters_list_ref)
+
+    def refresh_timer_dropdown():
+        if matter_dropdown_ref.current:
+            opts = get_matters_with_full_paths(for_timer=True)
+            matter_dropdown_ref.current.options = [
+                ft.DropdownOption(key=str(mid), text=path) for mid, path in opts
+            ]
+            if opts and not matter_dropdown_ref.current.value:
+                matter_dropdown_ref.current.value = str(opts[0][0])
+
+    matters_tab = build_matters_tab(page, matters_list_ref, refresh_timer_dropdown)
 
     expanded_clients: set[str] = set()
 
