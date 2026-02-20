@@ -122,10 +122,12 @@ def build_timer_tab(
 
 
 def build_matters_tab(page: ft.Page, list_ref: ft.Ref[ft.Column]) -> ft.Control:
-    """Build the Manage Matters tab: list of matters and add form."""
+    """Build the Manage Matters tab: add Clients (root) or Matters (under a client/parent)."""
     name_field = ft.Ref[ft.TextField]()
     code_field = ft.Ref[ft.TextField]()
     parent_dropdown = ft.Ref[ft.Dropdown]()
+    add_type_ref = ft.Ref[ft.SegmentedButton]()
+    parent_section_ref = ft.Ref[ft.Container]()
 
     def refresh_list():
         matters = get_all_matters()
@@ -147,11 +149,21 @@ def build_matters_tab(page: ft.Page, list_ref: ft.Ref[ft.Column]) -> ft.Control:
         n = name_field.current.value or ""
         c = code_field.current.value or ""
         if not n.strip() or not c.strip():
-            page.snack_bar = ft.SnackBar(ft.Text("Name and Matter code are required."), open=True)
+            page.snack_bar = ft.SnackBar(ft.Text("Name and code are required."), open=True)
             page.update()
             return
+        is_client = True
+        if add_type_ref.current and add_type_ref.current.selected:
+            is_client = add_type_ref.current.selected[0] == "client"
         pid = None
-        if parent_dropdown.current and parent_dropdown.current.value:
+        if not is_client:
+            if not parent_dropdown.current or not parent_dropdown.current.value:
+                page.snack_bar = ft.SnackBar(
+                    ft.Text("Select a parent client or matter when adding a matter."),
+                    open=True,
+                )
+                page.update()
+                return
             try:
                 pid = int(parent_dropdown.current.value)
             except (TypeError, ValueError):
@@ -180,13 +192,34 @@ def build_matters_tab(page: ft.Page, list_ref: ft.Ref[ft.Column]) -> ft.Control:
             ]
         page.update()
 
+    def on_type_change(e):
+        if parent_section_ref.current and add_type_ref.current:
+            parent_section_ref.current.visible = (
+                add_type_ref.current.selected and add_type_ref.current.selected[0] == "matter"
+            )
+            page.update()
+
     path_options = get_matters_with_full_paths()
     parent_dropdown_control = ft.Dropdown(
         ref=parent_dropdown,
-        label="Parent matter (optional)",
+        label="Parent client or matter",
         width=400,
         options=[ft.DropdownOption(key=str(mid), text=path) for mid, path in path_options],
         value=None,
+    )
+    parent_section = ft.Container(
+        ref=parent_section_ref,
+        content=parent_dropdown_control,
+        visible=False,
+    )
+    add_type_button = ft.SegmentedButton(
+        ref=add_type_ref,
+        segments=[
+            ft.Segment(value="client", label=ft.Text("Client")),
+            ft.Segment(value="matter", label=ft.Text("Matter")),
+        ],
+        selected=["client"],
+        on_change=on_type_change,
     )
     # Populate list at build time so we never update a control before it's on the page
     matters = get_all_matters()
@@ -210,13 +243,17 @@ def build_matters_tab(page: ft.Page, list_ref: ft.Ref[ft.Column]) -> ft.Control:
         [
             ft.Text("Manage Matters", size=24, weight=ft.FontWeight.BOLD),
             ft.Container(height=16),
+            ft.Text("Add as", size=14),
+            ft.Container(height=4),
+            add_type_button,
+            ft.Container(height=16),
             ft.TextField(ref=name_field, label="Name", width=400),
-            ft.TextField(ref=code_field, label="Matter code", width=400),
-            parent_dropdown_control,
+            ft.TextField(ref=code_field, label="Code", width=400),
+            parent_section,
             ft.Container(height=8),
-            ft.ElevatedButton("Add matter", icon=ft.Icons.ADD, on_click=on_add),
+            ft.ElevatedButton("Add", icon=ft.Icons.ADD, on_click=on_add),
             ft.Container(height=24),
-            ft.Text("Matters", size=16, weight=ft.FontWeight.W_500),
+            ft.Text("Clients & Matters", size=16, weight=ft.FontWeight.W_500),
             ft.Container(height=8),
             list_column,
         ],
