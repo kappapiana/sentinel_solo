@@ -4,6 +4,7 @@ Sentinel Solo: Flet UI with Timer and Manage Matters.
 import asyncio
 from collections import defaultdict
 from datetime import datetime
+from typing import Callable
 
 import flet as ft
 
@@ -262,11 +263,19 @@ def build_matters_tab(page: ft.Page, list_ref: ft.Ref[ft.Column]) -> ft.Control:
     )
 
 
-def build_reporting_tab(page: ft.Page) -> ft.Control:
-    """Build the Reporting tab: table of Client | Matter | Time spent."""
-    rows_data = get_time_by_client_and_matter()
+def build_reporting_tab(
+    page: ft.Page,
+    expanded_clients: set[str],
+    on_toggle_client: Callable[[str], None],
+    rows_data: list[tuple[str, str, float]] | None = None,
+) -> ft.Control:
+    """Build the Reporting tab: clients (collapsed by default), expand to show matters; search shows ~6 matches."""
+    if rows_data is None:
+        rows_data = get_time_by_client_and_matter()
+    search_results_ref = ft.Ref[ft.Column]()
+
     if not rows_data:
-        content = ft.Column(
+        return ft.Column(
             [
                 ft.Text("Reporting", size=24, weight=ft.FontWeight.BOLD),
                 ft.Container(height=16),
@@ -278,55 +287,96 @@ def build_reporting_tab(page: ft.Page) -> ft.Control:
             expand=True,
             horizontal_alignment=ft.CrossAxisAlignment.START,
         )
-    else:
-        # Group by client, compute client totals; emit Total row then detail rows per client
-        by_client: dict[str, list[tuple[str, float]]] = defaultdict(list)
-        for client_name, matter_path, total_seconds in rows_data:
-            by_client[client_name].append((matter_path, total_seconds))
-        table_rows = []
-        for client_name in sorted(by_client.keys()):
-            matter_rows = by_client[client_name]
-            client_total_seconds = sum(sec for _, sec in matter_rows)
-            table_rows.append(
-                ft.DataRow(
-                    cells=[
-                        ft.DataCell(ft.Text(client_name)),
-                        ft.DataCell(ft.Text("Total")),
-                        ft.DataCell(ft.Text(format_elapsed(client_total_seconds))),
-                    ],
+
+    by_client: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    for client_name, matter_path, total_seconds in rows_data:
+        by_client[client_name].append((matter_path, total_seconds))
+
+    def on_search(e):
+        if not search_results_ref.current:
+            return
+        q = (e.control.value or "").strip().lower()
+        if not q:
+            search_results_ref.current.controls = []
+            search_results_ref.current.visible = False
+        else:
+            matching = [
+                r for r in rows_data
+                if q in r[0].lower() or q in r[1].lower()
+            ][:6]
+            search_results_ref.current.controls = [
+                ft.ListTile(
+                    title=ft.Text(matter_path, size=14),
+                    subtitle=ft.Text(f"{client_name} · {format_elapsed(sec)}", size=12),
                 )
+                for client_name, matter_path, sec in matching
+            ]
+            search_results_ref.current.visible = bool(matching)
+        page.update()
+
+    search_field = ft.TextField(
+        label="Search clients and matters",
+        width=400,
+        on_change=on_search,
+    )
+
+    search_results_column = ft.Column(
+        ref=search_results_ref,
+        visible=False,
+        scroll=ft.ScrollMode.AUTO,
+    )
+
+    client_blocks = []
+    for client_name in sorted(by_client.keys()):
+        matter_rows = by_client[client_name]
+        client_total_seconds = sum(sec for _, sec in matter_rows)
+        is_expanded = client_name in expanded_clients
+        client_blocks.append(
+            ft.Column(
+                [
+                    ft.ListTile(
+                        title=ft.Text(client_name, weight=ft.FontWeight.W_500),
+                        subtitle=ft.Text(f"Total {format_elapsed(client_total_seconds)}"),
+                        trailing=ft.Icon(
+                            ft.Icons.EXPAND_LESS if is_expanded else ft.Icons.EXPAND_MORE,
+                        ),
+                        on_click=lambda e, c=client_name: on_toggle_client(c),
+                    ),
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.ListTile(
+                                    title=ft.Text(matter_path, size=14),
+                                    subtitle=ft.Text(format_elapsed(total_seconds), size=12),
+                                )
+                                for matter_path, total_seconds in sorted(matter_rows, key=lambda r: r[0])
+                            ],
+                        ),
+                        visible=is_expanded,
+                        padding=ft.Padding.only(left=24),
+                    ),
+                ],
             )
-            for matter_path, total_seconds in sorted(matter_rows, key=lambda r: r[0]):
-                table_rows.append(
-                    ft.DataRow(
-                        cells=[
-                            ft.DataCell(ft.Text(client_name)),
-                            ft.DataCell(ft.Text(matter_path)),
-                            ft.DataCell(ft.Text(format_elapsed(total_seconds))),
-                        ],
-                    )
-                )
-        table = ft.DataTable(
-            columns=[
-                ft.DataColumn(label=ft.Text("Client")),
-                ft.DataColumn(label=ft.Text("Matter")),
-                ft.DataColumn(label=ft.Text("Time spent")),
-            ],
-            rows=table_rows,
         )
-        content = ft.Column(
-            [
-                ft.Text("Reporting", size=24, weight=ft.FontWeight.BOLD),
-                ft.Container(height=16),
-                ft.Container(
-                    content=ft.Column([table], scroll=ft.ScrollMode.AUTO),
-                    expand=True,
-                ),
-            ],
-            expand=True,
-            horizontal_alignment=ft.CrossAxisAlignment.START,
-        )
-    return content
+
+    return ft.Column(
+        [
+            ft.Text("Reporting", size=24, weight=ft.FontWeight.BOLD),
+            ft.Container(height=16),
+            search_field,
+            ft.Container(height=8),
+            search_results_column,
+            ft.Container(height=16),
+            ft.Text("By client", size=16, weight=ft.FontWeight.W_500),
+            ft.Container(height=8),
+            ft.Container(
+                content=ft.Column(client_blocks, scroll=ft.ScrollMode.AUTO),
+                expand=True,
+            ),
+        ],
+        expand=True,
+        horizontal_alignment=ft.CrossAxisAlignment.START,
+    )
 
 
 def main(page: ft.Page) -> None:
@@ -345,8 +395,17 @@ def main(page: ft.Page) -> None:
         page, timer_label_ref, matter_dropdown_ref, running_ref, start_time_ref
     )
     matters_tab = build_matters_tab(page, matters_list_ref)
-    reporting_tab = build_reporting_tab(page)
 
+    expanded_clients: set[str] = set()
+
+    def on_toggle_client(client_name: str):
+        expanded_clients.symmetric_difference_update([client_name])
+        reporting_container.content = build_reporting_tab(
+            page, expanded_clients, on_toggle_client
+        )
+        page.update()
+
+    reporting_tab = build_reporting_tab(page, expanded_clients, on_toggle_client)
     timer_container = ft.Container(content=timer_tab, expand=True)
     matters_container = ft.Container(content=matters_tab, expand=True)
     reporting_container = ft.Container(content=reporting_tab, expand=True)
@@ -368,7 +427,9 @@ def main(page: ft.Page) -> None:
 
     def show_reporting(_):
         # Rebuild so data is current when opening the tab
-        reporting_container.content = build_reporting_tab(page)
+        reporting_container.content = build_reporting_tab(
+            page, expanded_clients, on_toggle_client
+        )
         body_ref.current.content = reporting_container
         page.update()
 
