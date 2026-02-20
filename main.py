@@ -123,25 +123,70 @@ def build_timer_tab(
 
 
 def build_matters_tab(page: ft.Page, list_ref: ft.Ref[ft.Column]) -> ft.Control:
-    """Build the Manage Matters tab: add Clients (root) or Matters (under a client/parent)."""
+    """Build the Manage Matters tab: add Clients (root) or Matters (under a client/parent).
+    List shows clients first (collapsed); click to expand and see matters. Search shows ~6 matches."""
     name_field = ft.Ref[ft.TextField]()
     code_field = ft.Ref[ft.TextField]()
     parent_dropdown = ft.Ref[ft.Dropdown]()
     add_type_ref = ft.Ref[ft.SegmentedButton]()
     parent_section_ref = ft.Ref[ft.Container]()
+    search_results_ref = ft.Ref[ft.Column]()
 
-    def refresh_list():
+    expanded_clients_matters: set[str] = set()
+
+    def _by_client():
         matters = get_all_matters()
         path_list = get_matters_with_full_paths()
         path_by_id = {mid: path for mid, path in path_list}
-        if list_ref.current:
-            list_ref.current.controls = [
+        by_client: dict[str, list[tuple[int, str, str]]] = defaultdict(list)
+        for m in matters:
+            path = path_by_id.get(m.id, m.name)
+            client = path.split(" > ")[0] if " > " in path else path
+            by_client[client].append((m.id, path, m.matter_code))
+        for client in by_client:
+            by_client[client].sort(key=lambda x: x[1])
+        return by_client
+
+    def _build_list_controls(by_client: dict):
+        controls = []
+        for client_name in sorted(by_client.keys()):
+            items = by_client[client_name]
+            is_expanded = client_name in expanded_clients_matters
+            controls.append(
                 ft.ListTile(
-                    title=ft.Text(path_by_id.get(m.id, m.name)),
-                    subtitle=ft.Text(m.matter_code),
-                )
-                for m in matters
-            ]
+                    title=ft.Text(client_name, weight=ft.FontWeight.W_500),
+                    subtitle=ft.Text(f"{len(items)} matter(s)"),
+                    trailing=ft.Icon(
+                        ft.Icons.EXPAND_LESS if is_expanded else ft.Icons.EXPAND_MORE,
+                    ),
+                    on_click=lambda e, c=client_name: _on_toggle_client(c),
+                ),
+            )
+            controls.append(
+                ft.Container(
+                    content=ft.Column(
+                        [
+                            ft.ListTile(
+                                title=ft.Text(path, size=14),
+                                subtitle=ft.Text(code, size=12),
+                            )
+                            for _, path, code in items
+                        ],
+                    ),
+                    visible=is_expanded,
+                    padding=ft.Padding.only(left=24),
+                ),
+            )
+        return controls
+
+    def _on_toggle_client(client_name: str):
+        expanded_clients_matters.symmetric_difference_update([client_name])
+        refresh_list()
+
+    def refresh_list():
+        by_client = _by_client()
+        if list_ref.current:
+            list_ref.current.controls = _build_list_controls(by_client)
             page.update()
 
     def on_add(_):
@@ -200,6 +245,32 @@ def build_matters_tab(page: ft.Page, list_ref: ft.Ref[ft.Column]) -> ft.Control:
             )
             page.update()
 
+    def on_search(e):
+        if not search_results_ref.current:
+            return
+        by_client = _by_client()
+        all_entries = [
+            (c, path, code)
+            for c, items in by_client.items()
+            for (_, path, code) in items
+        ]
+        all_entries.extend((c, c, "") for c in by_client.keys())  # clients as entries too
+        q = (e.control.value or "").strip().lower()
+        if not q:
+            search_results_ref.current.controls = []
+            search_results_ref.current.visible = False
+        else:
+            matching = [x for x in all_entries if q in x[0].lower() or q in x[1].lower()][:6]
+            search_results_ref.current.controls = [
+                ft.ListTile(
+                    title=ft.Text(path or client, size=14),
+                    subtitle=ft.Text(f"{client}" + (f" · {code}" if code else ""), size=12),
+                )
+                for client, path, code in matching
+            ]
+            search_results_ref.current.visible = bool(matching)
+        page.update()
+
     path_options = get_matters_with_full_paths()
     parent_dropdown_control = ft.Dropdown(
         ref=parent_dropdown,
@@ -222,22 +293,24 @@ def build_matters_tab(page: ft.Page, list_ref: ft.Ref[ft.Column]) -> ft.Control:
         selected=["client"],
         on_change=on_type_change,
     )
-    # Populate list at build time so we never update a control before it's on the page
-    matters = get_all_matters()
-    path_list = get_matters_with_full_paths()
-    path_by_id = {mid: path for mid, path in path_list}
-    initial_list_controls = [
-        ft.ListTile(
-            title=ft.Text(path_by_id.get(m.id, m.name)),
-            subtitle=ft.Text(m.matter_code),
-        )
-        for m in matters
-    ]
+
+    search_field = ft.TextField(
+        label="Search clients and matters",
+        width=400,
+        on_change=on_search,
+    )
+    search_results_column = ft.Column(
+        ref=search_results_ref,
+        visible=False,
+        scroll=ft.ScrollMode.AUTO,
+    )
+
+    by_client_initial = _by_client()
     list_column = ft.Column(
         ref=list_ref,
         scroll=ft.ScrollMode.AUTO,
         expand=True,
-        controls=initial_list_controls,
+        controls=_build_list_controls(by_client_initial),
     )
 
     return ft.Column(
@@ -255,6 +328,10 @@ def build_matters_tab(page: ft.Page, list_ref: ft.Ref[ft.Column]) -> ft.Control:
             ft.ElevatedButton("Add", icon=ft.Icons.ADD, on_click=on_add),
             ft.Container(height=24),
             ft.Text("Clients & Matters", size=16, weight=ft.FontWeight.W_500),
+            ft.Container(height=8),
+            search_field,
+            ft.Container(height=8),
+            search_results_column,
             ft.Container(height=8),
             list_column,
         ],
