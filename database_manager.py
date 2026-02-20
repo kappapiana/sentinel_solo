@@ -2,7 +2,7 @@
 Database manager for Sentinel Solo: matters and time entries.
 """
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
@@ -84,3 +84,45 @@ def get_running_entry() -> TimeEntry | None:
             .order_by(TimeEntry.start_time.desc())
             .first()
         )
+
+
+def _get_root_matter_name(session: Session, matter: Matter) -> str:
+    """Resolve root matter (parent_id is None) and return its name."""
+    current = matter
+    while current.parent_id is not None:
+        current = session.query(Matter).get(current.parent_id)
+        if current is None:
+            return matter.name
+    return current.name
+
+
+def get_time_by_client_and_matter(
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> list[tuple[str, str, float]]:
+    """
+    Return aggregated time by client (root matter) and matter (full path).
+    Only completed entries (end_time set) are included.
+    Returns list of (client_name, matter_full_path, total_seconds), sorted by client then matter.
+    """
+    with get_session() as session:
+        q = session.query(TimeEntry).filter(TimeEntry.end_time.isnot(None))
+        if date_from is not None:
+            start_dt = datetime.combine(date_from, datetime.min.time())
+            q = q.filter(TimeEntry.start_time >= start_dt)
+        if date_to is not None:
+            end_dt = datetime.combine(date_to, datetime.max.time())
+            q = q.filter(TimeEntry.start_time <= end_dt)
+        entries = q.all()
+        agg: dict[tuple[str, str], float] = {}
+        for entry in entries:
+            matter = session.query(Matter).get(entry.matter_id)
+            if matter is None:
+                continue
+            client_name = _get_root_matter_name(session, matter)
+            full_path = matter.get_full_path(session)
+            key = (client_name, full_path)
+            agg[key] = agg.get(key, 0.0) + (entry.duration_seconds or 0.0)
+        result = [(client, path, total) for (client, path), total in agg.items()]
+        result.sort(key=lambda r: (r[0], r[1]))
+        return result

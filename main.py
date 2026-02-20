@@ -13,6 +13,7 @@ from database_manager import (
     stop_timer,
     get_matters_with_full_paths,
     get_all_matters,
+    get_time_by_client_and_matter,
 )
 
 
@@ -183,6 +184,55 @@ def build_matters_tab(page: ft.Page, list_ref: ft.Ref[ft.Column]) -> ft.Control:
     )
 
 
+def build_reporting_tab(page: ft.Page) -> ft.Control:
+    """Build the Reporting tab: table of Client | Matter | Time spent."""
+    rows_data = get_time_by_client_and_matter()
+    if not rows_data:
+        content = ft.Column(
+            [
+                ft.Text("Reporting", size=24, weight=ft.FontWeight.BOLD),
+                ft.Container(height=16),
+                ft.Text(
+                    "No completed time entries yet. Use the Timer to log time, then return here.",
+                    size=14,
+                ),
+            ],
+            expand=True,
+            horizontal_alignment=ft.CrossAxisAlignment.START,
+        )
+    else:
+        table = ft.DataTable(
+            columns=[
+                ft.DataColumn(label=ft.Text("Client")),
+                ft.DataColumn(label=ft.Text("Matter")),
+                ft.DataColumn(label=ft.Text("Time spent")),
+            ],
+            rows=[
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(client)),
+                        ft.DataCell(ft.Text(matter_path)),
+                        ft.DataCell(ft.Text(format_elapsed(total_seconds))),
+                    ],
+                )
+                for client, matter_path, total_seconds in rows_data
+            ],
+        )
+        content = ft.Column(
+            [
+                ft.Text("Reporting", size=24, weight=ft.FontWeight.BOLD),
+                ft.Container(height=16),
+                ft.Container(
+                    content=ft.Column([table], scroll=ft.ScrollMode.AUTO),
+                    expand=True,
+                ),
+            ],
+            expand=True,
+            horizontal_alignment=ft.CrossAxisAlignment.START,
+        )
+    return content
+
+
 def main(page: ft.Page) -> None:
     page.theme_mode = ft.ThemeMode.DARK
     page.title = "Sentinel Solo"
@@ -199,9 +249,11 @@ def main(page: ft.Page) -> None:
         page, timer_label_ref, matter_dropdown_ref, running_ref, start_time_ref
     )
     matters_tab = build_matters_tab(page, matters_list_ref)
+    reporting_tab = build_reporting_tab(page)
 
     timer_container = ft.Container(content=timer_tab, expand=True)
     matters_container = ft.Container(content=matters_tab, expand=True)
+    reporting_container = ft.Container(content=reporting_tab, expand=True)
 
     def show_timer(_):
         body_ref.current.content = timer_container
@@ -217,6 +269,21 @@ def main(page: ft.Page) -> None:
     def show_matters(_):
         body_ref.current.content = matters_container
         page.update()
+
+    def show_reporting(_):
+        # Rebuild so data is current when opening the tab
+        reporting_container.content = build_reporting_tab(page)
+        body_ref.current.content = reporting_container
+        page.update()
+
+    def on_rail_change(e):
+        idx = e.control.selected_index
+        if idx == 0:
+            show_timer(e)
+        elif idx == 1:
+            show_matters(e)
+        else:
+            show_reporting(e)
 
     rail = ft.NavigationRail(
         selected_index=0,
@@ -234,8 +301,13 @@ def main(page: ft.Page) -> None:
                 selected_icon=ft.Icons.FOLDER_OPEN,
                 label="Manage Matters",
             ),
+            ft.NavigationRailDestination(
+                icon=ft.Icons.ASSESSMENT,
+                selected_icon=ft.Icons.ASSESSMENT,
+                label="Reporting",
+            ),
         ],
-        on_change=lambda e: (show_matters if e.control.selected_index == 1 else show_timer)(e),
+        on_change=on_rail_change,
     )
 
     body = ft.Container(ref=body_ref, content=timer_container, expand=True)
