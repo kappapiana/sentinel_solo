@@ -2,9 +2,12 @@
 Sentinel Solo: Flet UI with Timer and Manage Matters.
 """
 import asyncio
+from collections import defaultdict
 from datetime import datetime
 
 import flet as ft
+
+from sqlalchemy.exc import IntegrityError
 
 from database_manager import (
     init_db,
@@ -91,17 +94,22 @@ def build_timer_tab(
     start_btn.on_click = on_start
     stop_btn.on_click = on_stop
 
-    # When no matters under a client exist, show message instead of dropdown
     timer_controls = [
         ft.Text("Timer", size=24, weight=ft.FontWeight.BOLD),
         ft.Container(height=16),
     ]
-    if options:
-        timer_controls.extend([dropdown, ft.Container(height=24), label, ft.Container(height=24), ft.Row([start_btn, stop_btn], spacing=12)])
-    else:
+    if not options:
         timer_controls.append(
             ft.Text("Add at least one matter under a client to log time.", size=14)
         )
+        timer_controls.append(ft.Container(height=16))
+    timer_controls.extend([
+        dropdown,
+        ft.Container(height=24),
+        label,
+        ft.Container(height=24),
+        ft.Row([start_btn, stop_btn], spacing=12),
+    ])
 
     return ft.Column(
         timer_controls,
@@ -137,16 +145,37 @@ def build_matters_tab(page: ft.Page, list_ref: ft.Ref[ft.Column]) -> ft.Control:
         n = name_field.current.value or ""
         c = code_field.current.value or ""
         if not n.strip() or not c.strip():
+            page.snack_bar = ft.SnackBar(ft.Text("Name and Matter code are required."), open=True)
+            page.update()
             return
         pid = None
         if parent_dropdown.current and parent_dropdown.current.value:
-            pid = int(parent_dropdown.current.value)
-        add_matter(name=n.strip(), matter_code=c.strip(), parent_id=pid)
+            try:
+                pid = int(parent_dropdown.current.value)
+            except (TypeError, ValueError):
+                page.snack_bar = ft.SnackBar(ft.Text("Invalid parent selection."), open=True)
+                page.update()
+                return
+        try:
+            add_matter(name=n.strip(), matter_code=c.strip(), parent_id=pid)
+        except IntegrityError:
+            page.snack_bar = ft.SnackBar(
+                ft.Text("A matter with this code already exists. Use a unique Matter code."),
+                open=True,
+            )
+            page.update()
+            return
         name_field.current.value = ""
         code_field.current.value = ""
         if parent_dropdown.current:
             parent_dropdown.current.value = None
         refresh_list()
+        # Refresh parent dropdown so the new matter can be selected as parent
+        if parent_dropdown.current:
+            path_options = get_matters_with_full_paths()
+            parent_dropdown.current.options = [
+                ft.DropdownOption(key=str(mid), text=path) for mid, path in path_options
+            ]
         page.update()
 
     path_options = get_matters_with_full_paths()
@@ -211,22 +240,40 @@ def build_reporting_tab(page: ft.Page) -> ft.Control:
             horizontal_alignment=ft.CrossAxisAlignment.START,
         )
     else:
+        # Group by client, compute client totals; emit Total row then detail rows per client
+        by_client: dict[str, list[tuple[str, float]]] = defaultdict(list)
+        for client_name, matter_path, total_seconds in rows_data:
+            by_client[client_name].append((matter_path, total_seconds))
+        table_rows = []
+        for client_name in sorted(by_client.keys()):
+            matter_rows = by_client[client_name]
+            client_total_seconds = sum(sec for _, sec in matter_rows)
+            table_rows.append(
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(client_name)),
+                        ft.DataCell(ft.Text("Total")),
+                        ft.DataCell(ft.Text(format_elapsed(client_total_seconds))),
+                    ],
+                )
+            )
+            for matter_path, total_seconds in sorted(matter_rows, key=lambda r: r[0]):
+                table_rows.append(
+                    ft.DataRow(
+                        cells=[
+                            ft.DataCell(ft.Text(client_name)),
+                            ft.DataCell(ft.Text(matter_path)),
+                            ft.DataCell(ft.Text(format_elapsed(total_seconds))),
+                        ],
+                    )
+                )
         table = ft.DataTable(
             columns=[
                 ft.DataColumn(label=ft.Text("Client")),
                 ft.DataColumn(label=ft.Text("Matter")),
                 ft.DataColumn(label=ft.Text("Time spent")),
             ],
-            rows=[
-                ft.DataRow(
-                    cells=[
-                        ft.DataCell(ft.Text(client)),
-                        ft.DataCell(ft.Text(matter_path)),
-                        ft.DataCell(ft.Text(format_elapsed(total_seconds))),
-                    ],
-                )
-                for client, matter_path, total_seconds in rows_data
-            ],
+            rows=table_rows,
         )
         content = ft.Column(
             [
