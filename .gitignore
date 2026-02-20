@@ -18,9 +18,12 @@ build/
 *.db
 sentinel.db
 
+<<<<<<< HEAD
 # Exported timesheets
 exports/
 
+=======
+>>>>>>> oop-refactor
 # IDE / editor
 .idea/
 .vscode/
