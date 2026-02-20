@@ -37,6 +37,7 @@ from database_manager import (
 =======
 from database_manager import DatabaseManager, db
 
+__version__ = "v.0.0.1"
 
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 >>>>>>> oop-refactor
@@ -1249,7 +1250,7 @@ class SentinelApp:
     def setup(self) -> None:
         page = self.page
         page.theme_mode = ft.ThemeMode.DARK
-        page.title = "Sentinel Solo"
+        page.title = f"Sentinel Solo {__version__}"
         page.padding = 24
 
         timer_tab = self._build_timer_tab()
@@ -2898,7 +2899,7 @@ def build_reporting_tab(
 def main(page: ft.Page) -> None:
 <<<<<<< HEAD
     page.theme_mode = ft.ThemeMode.DARK
-    page.title = "Sentinel Solo"
+    page.title = f"Sentinel Solo {__version__}"
     page.padding = 24
 
     timer_label_ref: ft.Ref[ft.Text] = ft.Ref()
