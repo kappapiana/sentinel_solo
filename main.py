@@ -963,12 +963,18 @@ class SentinelApp:
             for client_name in sorted(by_client.keys()):
                 items = by_client[client_name]
                 is_exp = client_name in move_expanded
+                # Root matter (client) in this group: path with no " > " is the client itself
+                client_as_target = next((x for x in items if " > " not in x[1]), None)
+                def _on_move_header_click(e, c=client_name, root_item=client_as_target):
+                    _on_toggle_move_expanded(c)
+                    if root_item is not None:
+                        _on_move_select(root_item[0], root_item[1])
                 controls.append(
                     ft.ListTile(
                         title=ft.Text(client_name, weight=ft.FontWeight.W_500, size=14),
                         subtitle=ft.Text(f"{len(items)} matter(s)", size=12),
                         trailing=ft.Icon(ft.Icons.EXPAND_LESS if is_exp else ft.Icons.EXPAND_MORE, size=20),
-                        on_click=lambda e, c=client_name: _on_toggle_move_expanded(c),
+                        on_click=_on_move_header_click,
                     ),
                 )
                 controls.append(
