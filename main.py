@@ -28,6 +28,13 @@ def format_elapsed(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def format_elapsed_hm(seconds: float) -> str:
+    """Format seconds as H:MM or HH:MM (no seconds). For Today's activities duration."""
+    h = int(seconds) // 3600
+    m = (int(seconds) % 3600) // 60
+    return f"{h}:{m:02d}"
+
+
 def format_datetime(dt: datetime | None) -> str:
     """Format for display and editing."""
     if dt is None:
@@ -260,6 +267,8 @@ class SentinelApp:
                 return [
                     ft.ListTile(
                         title=ft.Text(path, size=14),
+                        dense=True,
+                        content_padding=2,
                         on_click=lambda e, mid=mid, path=path: _on_timer_matter_select(mid, path),
                     )
                     for mid, path in flat
@@ -274,6 +283,8 @@ class SentinelApp:
                         title=ft.Text(client_name, weight=ft.FontWeight.W_500, size=14),
                         subtitle=ft.Text(f"{len(items)} matter(s)", size=12),
                         trailing=ft.Icon(ft.Icons.EXPAND_LESS if is_exp else ft.Icons.EXPAND_MORE, size=20),
+                        dense=True,
+                        content_padding=2,
                         on_click=lambda e, c=client_name: _on_timer_matter_toggle(c),
                     ),
                 )
@@ -283,13 +294,16 @@ class SentinelApp:
                             [
                                 ft.ListTile(
                                     title=ft.Text(path, size=14),
+                                    dense=True,
+                                    content_padding=2,
                                     on_click=lambda e, mid=mid, path=path: _on_timer_matter_select(mid, path),
                                 )
                                 for mid, path in items
                             ],
+                            spacing=0,
                         ),
                         visible=is_exp,
-                        padding=ft.Padding.only(left=20),
+                        padding=ft.Padding.only(left=16, top=0, right=0, bottom=0),
                     ),
                 )
             return controls
@@ -356,13 +370,20 @@ class SentinelApp:
                 dur_sec = entry.duration_seconds or 0.0
                 if entry.end_time is None and entry.start_time:
                     dur_sec = max(0, (datetime.now() - entry.start_time).total_seconds())
-                duration_val = format_elapsed(dur_sec)
+                duration_val = format_elapsed_hm(dur_sec)
+                desc_val = (entry.description or "").strip()
 
                 matter_dd = ft.Dropdown(
                     value=str(entry.matter_id),
                     options=matter_options,
                     width=320,
                     on_select=lambda e, eid=entry_id: _on_activity_matter_change(eid, e.control.value),
+                )
+                desc_tf = ft.TextField(
+                    value=desc_val,
+                    width=200,
+                    hint_text="Task description",
+                    on_blur=lambda e, eid=entry_id: _on_activity_description_blur(eid, e.control.value),
                 )
                 start_tf = ft.TextField(value=start_val, width=90, on_blur=lambda e, eid=entry_id: _on_activity_start_blur(eid, e.control.value))
                 end_tf = ft.TextField(value=end_val, width=90, on_blur=lambda e, eid=entry_id: _on_activity_end_blur(eid, e.control.value))
@@ -440,9 +461,19 @@ class SentinelApp:
                     _refresh_activities()
                     page.update()
 
+                def _on_activity_description_blur(eid: int, s: str):
+                    val = (s or "").strip()
+                    try:
+                        self.db.update_time_entry(eid, description=val if val else None)
+                        page.snack_bar = ft.SnackBar(ft.Text("Description updated."), open=True)
+                    except ValueError as err:
+                        page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                    _refresh_activities()
+                    page.update()
+
                 rows.append(
                     ft.Row(
-                        [matter_dd, start_tf, end_tf, duration_tf],
+                        [matter_dd, desc_tf, start_tf, end_tf, duration_tf],
                         spacing=12,
                         alignment=ft.MainAxisAlignment.START,
                     )
@@ -453,6 +484,7 @@ class SentinelApp:
             header = ft.Row(
                 [
                     ft.Text("Matter", size=12, weight=ft.FontWeight.W_500, width=320),
+                    ft.Text("Description", size=12, weight=ft.FontWeight.W_500, width=200),
                     ft.Text("Start", size=12, weight=ft.FontWeight.W_500, width=90),
                     ft.Text("End", size=12, weight=ft.FontWeight.W_500, width=90),
                     ft.Text("Duration", size=12, weight=ft.FontWeight.W_500, width=100),
@@ -668,12 +700,14 @@ class SentinelApp:
                         width=400,
                         on_change=on_timer_matter_search,
                     ),
+                    ft.Container(height=4),
                     ft.Container(
                         content=ft.Column(ref=timer_matter_list_ref, controls=timer_matter_list_initial, scroll=ft.ScrollMode.AUTO),
                         height=160,
                         border=ft.border.all(1, ft.Colors.OUTLINE),
                         border_radius=4,
                     ),
+                    ft.Container(height=4),
                     ft.Text(
                         ref=timer_matter_selection_ref,
                         size=12,
@@ -682,10 +716,11 @@ class SentinelApp:
                     ft.Text("All time (timer and manual) is logged to the matter selected above.", size=12),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=2,
             ),
             border=ft.border.all(1, ft.Colors.OUTLINE),
             border_radius=4,
-            padding=8,
+            padding=6,
         )
 
         start_time_row = ft.Container(
