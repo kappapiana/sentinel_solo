@@ -1,6 +1,8 @@
 """
 Database manager for Sentinel Solo: matters and time entries.
+Supports local SQLite (default) or remote PostgreSQL via DATABASE_URL.
 """
+import os
 import re
 from pathlib import Path
 from datetime import datetime, date, timedelta
@@ -9,6 +11,7 @@ from typing import Generator
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy import inspect
 
 from models import Base, Matter, TimeEntry
 
@@ -16,11 +19,15 @@ from models import Base, Matter, TimeEntry
 class DatabaseManager:
     """Database as an object: owns engine and sessions, exposes operations as methods."""
 
-    def __init__(self, db_path: Path | str | None = None) -> None:
-        if db_path is None:
-            db_path = Path(__file__).resolve().parent / "sentinel.db"
-        path_str = str(db_path)
-        self._engine = create_engine(f"sqlite:///{path_str}", echo=False)
+    def __init__(self, db_path: Path | str | None = None, database_url: str | None = None) -> None:
+        url = database_url or os.environ.get("DATABASE_URL")
+        if url:
+            self._engine = create_engine(url, echo=False)
+        else:
+            if db_path is None:
+                db_path = Path(__file__).resolve().parent / "sentinel.db"
+            path_str = str(db_path)
+            self._engine = create_engine(f"sqlite:///{path_str}", echo=False)
         self._session_factory = sessionmaker(
             bind=self._engine, autocommit=False, autoflush=False
         )
@@ -35,18 +42,18 @@ class DatabaseManager:
             session.close()
 
     def init_db(self) -> None:
-        """Create tables if they do not exist. Add invoiced column to time_entries if missing."""
+        """Create tables if they do not exist. Add invoiced column to time_entries if missing (DB-agnostic)."""
         Base.metadata.create_all(self._engine)
-        # Migration: add invoiced column if it doesn't exist (e.g. existing DBs from before timesheet)
         with self._engine.connect() as conn:
-            r = conn.execute(
-                text("SELECT 1 FROM pragma_table_info('time_entries') WHERE name='invoiced'")
-            )
-            if r.fetchone() is None:
-                conn.execute(
-                    text("ALTER TABLE time_entries ADD COLUMN invoiced BOOLEAN NOT NULL DEFAULT 0")
-                )
-                conn.commit()
+            insp = inspect(conn)
+            if "time_entries" in insp.get_table_names():
+                columns = [c["name"] for c in insp.get_columns("time_entries")]
+                if "invoiced" not in columns:
+                    default = "0" if self._engine.dialect.name == "sqlite" else "FALSE"
+                    conn.execute(
+                        text(f"ALTER TABLE time_entries ADD COLUMN invoiced BOOLEAN NOT NULL DEFAULT {default}")
+                    )
+                    conn.commit()
 
     def _slugify(self, name: str) -> str:
         """Lowercase, replace non-alphanumeric with hyphen, strip. Empty -> 'matter'."""

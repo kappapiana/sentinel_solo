@@ -2,7 +2,7 @@
 
 A desktop time-tracking app with a hierarchy of **clients** and **matters** (projects/subprojects). Log time with a timer or by manual entry; view and edit time entries per matter; move or merge matters with time ported correctly.
 
-**Tech stack:** Python 3.12, [Flet](https://flet.dev/) (GUI), SQLAlchemy, SQLite.
+**Tech stack:** Python 3.12, [Flet](https://flet.dev/) (GUI), SQLAlchemy. Database: SQLite (default) or PostgreSQL (remote).
 
 ## Features
 
@@ -44,6 +44,19 @@ Matters support unlimited nesting (Client → Project → Subproject…). Time c
    On Linux: `./run.sh` (uses the project venv and sets `XCURSOR_THEME` to avoid cursor theme warnings if needed).
 
 The first run creates a SQLite database (`sentinel.db`) in the project directory.
+
+**Optional: remote PostgreSQL**  
+To use a shared remote database (e.g. for multiple devices or Android), set the **`DATABASE_URL`** environment variable to a PostgreSQL connection string before starting the app:
+
+```bash
+export DATABASE_URL="postgresql+psycopg2://user:password@host:5432/dbname"
+python main.py
+```
+
+Create the database and tables on the server first (run the app once with that URL, or run `Base.metadata.create_all` against the engine). Use SSL and strong credentials in production; ensure the host allows connections from your clients (e.g. firewall, VPN).
+
+**Cross-platform and Android**  
+Flet runs on Windows, macOS, Linux, web, and mobile. To build an Android APK, use Flet’s build tools (see [Flet docs](https://flet.dev/docs/)); install Android SDK/NDK as required and run the APK build command. The same codebase runs on desktop and mobile.
 
 ## Project layout
 
