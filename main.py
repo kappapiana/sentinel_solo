@@ -361,12 +361,12 @@ class SentinelApp:
                 matter_dd = ft.Dropdown(
                     value=str(entry.matter_id),
                     options=matter_options,
-                    width=220,
+                    width=320,
                     on_select=lambda e, eid=entry_id: _on_activity_matter_change(eid, e.control.value),
                 )
-                start_tf = ft.TextField(value=start_val, width=70, on_blur=lambda e, eid=entry_id: _on_activity_start_blur(eid, e.control.value))
-                end_tf = ft.TextField(value=end_val, width=70, on_blur=lambda e, eid=entry_id: _on_activity_end_blur(eid, e.control.value))
-                duration_tf = ft.TextField(value=duration_val, width=80, on_blur=lambda e, eid=entry_id: _on_activity_duration_blur(eid, e.control.value))
+                start_tf = ft.TextField(value=start_val, width=90, on_blur=lambda e, eid=entry_id: _on_activity_start_blur(eid, e.control.value))
+                end_tf = ft.TextField(value=end_val, width=90, on_blur=lambda e, eid=entry_id: _on_activity_end_blur(eid, e.control.value))
+                duration_tf = ft.TextField(value=duration_val, width=100, on_blur=lambda e, eid=entry_id: _on_activity_duration_blur(eid, e.control.value))
 
                 def _on_activity_matter_change(eid: int, val: str | None):
                     if val is None:
@@ -452,10 +452,10 @@ class SentinelApp:
                 return [ft.Text("No activities recorded today. Start the timer or add a manual entry below.", size=14)]
             header = ft.Row(
                 [
-                    ft.Text("Matter", size=12, weight=ft.FontWeight.W_500, width=220),
-                    ft.Text("Start", size=12, weight=ft.FontWeight.W_500, width=70),
-                    ft.Text("End", size=12, weight=ft.FontWeight.W_500, width=70),
-                    ft.Text("Duration", size=12, weight=ft.FontWeight.W_500, width=80),
+                    ft.Text("Matter", size=12, weight=ft.FontWeight.W_500, width=320),
+                    ft.Text("Start", size=12, weight=ft.FontWeight.W_500, width=90),
+                    ft.Text("End", size=12, weight=ft.FontWeight.W_500, width=90),
+                    ft.Text("Duration", size=12, weight=ft.FontWeight.W_500, width=100),
                 ],
                 spacing=12,
             )
@@ -479,19 +479,19 @@ class SentinelApp:
         )
         activities_list_container = ft.Container(
             content=activities_list_column,
-            height=280,
+            height=240,
         )
 
         activities_section = ft.Container(
             content=ft.Column(
                 [
                     ft.Text("Today's activities", size=18, weight=ft.FontWeight.W_500),
-                    ft.Container(height=8),
+                    ft.Container(height=6),
                     activities_list_container,
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.START,
             ),
-            padding=ft.Padding.only(bottom=16),
+            padding=ft.Padding.only(bottom=8),
         )
 
         description_ref = ft.Ref[ft.TextField]()
@@ -670,7 +670,7 @@ class SentinelApp:
                     ),
                     ft.Container(
                         content=ft.Column(ref=timer_matter_list_ref, controls=timer_matter_list_initial, scroll=ft.ScrollMode.AUTO),
-                        height=180,
+                        height=160,
                         border=ft.border.all(1, ft.Colors.OUTLINE),
                         border_radius=4,
                     ),
@@ -685,7 +685,7 @@ class SentinelApp:
             ),
             border=ft.border.all(1, ft.Colors.OUTLINE),
             border_radius=4,
-            padding=12,
+            padding=8,
         )
 
         start_time_row = ft.Container(
@@ -748,17 +748,17 @@ class SentinelApp:
 
         timer_controls = [
             ft.Text("Timer", size=24, weight=ft.FontWeight.BOLD),
-            ft.Container(height=16),
+            ft.Container(height=8),
             activities_section,
         ]
         if not options:
             timer_controls.append(
                 ft.Text("Add at least one matter under a client to log time.", size=14)
             )
-            timer_controls.append(ft.Container(height=16))
+            timer_controls.append(ft.Container(height=8))
         timer_controls.extend([
             matter_block,
-            ft.Container(height=12),
+            ft.Container(height=8),
             ft.Text("How do you want to log time?", size=14),
             ft.Container(height=4),
             ft.SegmentedButton(
@@ -770,7 +770,7 @@ class SentinelApp:
                 selected=["timer"],
                 on_change=on_timer_mode_change,
             ),
-            ft.Container(height=12),
+            ft.Container(height=8),
             timer_section,
             manual_section,
         ])
