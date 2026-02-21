@@ -185,6 +185,18 @@ class DatabaseManager:
                 .all()
             )
 
+    def get_time_entries_for_day(self, day: date) -> list[TimeEntry]:
+        """Return time entries whose start_time falls on the given day (including running). Chronological order."""
+        with self._session() as session:
+            start_dt = datetime.combine(day, datetime.min.time())
+            end_dt = datetime.combine(day, datetime.max.time()) + timedelta(seconds=1)
+            return list(
+                session.query(TimeEntry)
+                .filter(TimeEntry.start_time >= start_dt, TimeEntry.start_time < end_dt)
+                .order_by(TimeEntry.start_time.asc())
+                .all()
+            )
+
     def get_descendant_matter_ids(self, matter_id: int) -> set[int]:
         """Return the set of matter ids that are descendants of matter_id (children, grandchildren, etc.)."""
         with self._session() as session:
@@ -271,17 +283,25 @@ class DatabaseManager:
         self,
         entry_id: int,
         description: str | None = None,
+        matter_id: int | None = None,
         start_time: datetime | None = None,
         end_time: datetime | None = None,
         duration_seconds: float | None = None,
     ) -> None:
-        """Update a time entry. Provide either all three time fields or exactly two."""
+        """Update a time entry. Optionally set matter_id (must exist and not be root). Provide time trio or two of start/end/duration."""
         with self._session() as session:
             entry = session.query(TimeEntry).get(entry_id)
             if entry is None:
                 raise ValueError("Time entry not found.")
             if description is not None:
                 entry.description = description
+            if matter_id is not None:
+                matter = session.query(Matter).get(matter_id)
+                if matter is None:
+                    raise ValueError("Matter not found.")
+                if matter.parent_id is None:
+                    raise ValueError("Time cannot be logged to a client.")
+                entry.matter_id = matter_id
             time_args = [start_time, end_time, duration_seconds]
             if any(x is not None for x in time_args):
                 provided = sum(x is not None for x in time_args)
