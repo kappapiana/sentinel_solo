@@ -4,7 +4,7 @@ Sentinel Solo: Flet UI with Timer and Manage Matters.
 import asyncio
 import json
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Callable
 
@@ -17,6 +17,7 @@ from database_manager import DatabaseManager, db
 __version__ = "v.0.0.1"
 
 DATETIME_FMT = "%Y-%m-%d %H:%M"
+TIME_FMT = "%H:%M"
 
 
 def format_elapsed(seconds: float) -> str:
@@ -32,6 +33,24 @@ def format_datetime(dt: datetime | None) -> str:
     if dt is None:
         return ""
     return dt.strftime(DATETIME_FMT)
+
+
+def format_time(dt: datetime | None) -> str:
+    """Time-only HH:MM for day-activity rows."""
+    if dt is None:
+        return ""
+    return dt.strftime(TIME_FMT)
+
+
+def parse_time(s: str) -> time | None:
+    """Parse HH:MM or H:MM; return time or None."""
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s, TIME_FMT).time()
+    except ValueError:
+        return None
 
 
 def parse_datetime(s: str) -> datetime | None:
@@ -102,6 +121,9 @@ class SentinelApp:
             refresh = (page.data or {}).get("refresh_timer_matters")
             if refresh:
                 refresh()
+            refresh_activities = (page.data or {}).get("refresh_timer_activities")
+            if refresh_activities:
+                refresh_activities()
 
         matters_tab = self._build_matters_tab(refresh_timer_dropdown)
 
@@ -122,6 +144,9 @@ class SentinelApp:
             refresh = (page.data or {}).get("refresh_timer_matters")
             if refresh:
                 refresh()
+            refresh_activities = (page.data or {}).get("refresh_timer_activities")
+            if refresh_activities:
+                refresh_activities()
             page.update()
 
         def show_matters(_):
@@ -198,14 +223,14 @@ class SentinelApp:
         matter_dropdown = self.matter_dropdown_ref
         running_ref = self.running_ref
         start_time_ref = self.start_time_ref
+        # Selectable matters only (non-roots); used for selection and search
         options = self.db.get_matters_with_full_paths(for_timer=True)
         timer_matter_selected: list = [options[0][0], options[0][1]] if options else [None, None]
-        timer_matter_expanded: set = set()
-        timer_matter_search_ref = ft.Ref[ft.TextField]()
-        timer_matter_list_ref = matter_dropdown
-        timer_matter_selection_ref = ft.Ref[ft.Text]()
+        # All matters (including roots) so every client appears as a section header even with 0 matters
+        options_all = self.db.get_matters_with_full_paths(for_timer=False)
 
         def _options_by_client_timer(opts: list[tuple[int, str]]) -> dict:
+            """Group by client (first path segment). Only non-root matters go into lists."""
             by_client = defaultdict(list)
             for mid, path in opts:
                 client = path.split(" > ")[0] if " > " in path else path
@@ -214,10 +239,24 @@ class SentinelApp:
                 by_client[client].sort(key=lambda x: x[1])
             return by_client
 
+        def _by_client_include_all_clients() -> dict:
+            """Like _options_by_client_timer but includes every client (root) as a key so clients with 0 matters appear."""
+            by_client = _options_by_client_timer(options)
+            for mid, path in options_all:
+                if " > " not in path:
+                    by_client.setdefault(path, [])
+            return by_client
+
+        _by_client_initial = _by_client_include_all_clients()
+        timer_matter_expanded: set = set(_by_client_initial.keys())
+        timer_matter_search_ref = ft.Ref[ft.TextField]()
+        timer_matter_list_ref = matter_dropdown
+        timer_matter_selection_ref = ft.Ref[ft.Text]()
+
         def _build_timer_matter_list(query: str):
             q = (query or "").strip().lower()
             if q:
-                flat = [(mid, path) for mid, path in options if path and q in path.lower()][:20]
+                flat = [(mid, path) for mid, path in options if path and q in path.lower()][:50]
                 return [
                     ft.ListTile(
                         title=ft.Text(path, size=14),
@@ -225,7 +264,7 @@ class SentinelApp:
                     )
                     for mid, path in flat
                 ]
-            by_client = _options_by_client_timer(options)
+            by_client = _by_client_include_all_clients()
             controls = []
             for client_name in sorted(by_client.keys()):
                 items = by_client[client_name]
@@ -275,8 +314,13 @@ class SentinelApp:
                 page.update()
 
         def refresh_timer_matter_list():
-            nonlocal options
+            nonlocal options, options_all
             options = self.db.get_matters_with_full_paths(for_timer=True)
+            options_all = self.db.get_matters_with_full_paths(for_timer=False)
+            # Keep all clients expanded so all matters from all clients are visible
+            by_client = _by_client_include_all_clients()
+            timer_matter_expanded.clear()
+            timer_matter_expanded.update(by_client.keys())
             if options and timer_matter_selected[0] not in [mid for mid, _ in options]:
                 timer_matter_selected[0], timer_matter_selected[1] = options[0][0], options[0][1]
                 if timer_matter_selection_ref.current:
@@ -289,6 +333,166 @@ class SentinelApp:
         if page.data is None:
             page.data = {}
         page.data["refresh_timer_matters"] = refresh_timer_matter_list
+
+        today = date.today()
+        activities_list_ref = ft.Ref[ft.Column]()
+
+        def _build_activities_rows() -> list[ft.Control]:
+            entries = self.db.get_time_entries_for_day(today)
+            path_options = self.db.get_matters_with_full_paths(for_timer=True)
+            path_by_id = {mid: path for mid, path in path_options}
+
+            def _refresh_activities():
+                if activities_list_ref.current:
+                    activities_list_ref.current.controls = _build_activities_rows()
+                    page.update()
+
+            rows: list[ft.Control] = []
+            for entry in entries:
+                entry_id = entry.id
+                matter_options = [ft.DropdownOption(key=str(mid), text=path) for mid, path in path_options]
+                start_val = format_time(entry.start_time)
+                end_val = format_time(entry.end_time) if entry.end_time is not None else "—"
+                dur_sec = entry.duration_seconds or 0.0
+                if entry.end_time is None and entry.start_time:
+                    dur_sec = max(0, (datetime.now() - entry.start_time).total_seconds())
+                duration_val = format_elapsed(dur_sec)
+
+                matter_dd = ft.Dropdown(
+                    value=str(entry.matter_id),
+                    options=matter_options,
+                    width=220,
+                    on_select=lambda e, eid=entry_id: _on_activity_matter_change(eid, e.control.value),
+                )
+                start_tf = ft.TextField(value=start_val, width=70, on_blur=lambda e, eid=entry_id: _on_activity_start_blur(eid, e.control.value))
+                end_tf = ft.TextField(value=end_val, width=70, on_blur=lambda e, eid=entry_id: _on_activity_end_blur(eid, e.control.value))
+                duration_tf = ft.TextField(value=duration_val, width=80, on_blur=lambda e, eid=entry_id: _on_activity_duration_blur(eid, e.control.value))
+
+                def _on_activity_matter_change(eid: int, val: str | None):
+                    if val is None:
+                        return
+                    try:
+                        mid = int(val)
+                        self.db.update_time_entry(eid, matter_id=mid)
+                        page.snack_bar = ft.SnackBar(ft.Text("Matter updated."), open=True)
+                    except ValueError as err:
+                        page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                    _refresh_activities()
+                    page.update()
+
+                def _on_activity_start_blur(eid: int, s: str):
+                    entry = next((x for x in self.db.get_time_entries_for_day(today) if x.id == eid), None)
+                    if not entry:
+                        return
+                    t = parse_time(s or "")
+                    if t is None:
+                        return
+                    day = entry.start_time.date()
+                    new_start = datetime.combine(day, t)
+                    dur = entry.duration_seconds or 0.0
+                    new_end = new_start + timedelta(seconds=dur)
+                    try:
+                        self.db.update_time_entry(eid, start_time=new_start, end_time=new_end, duration_seconds=dur)
+                        page.snack_bar = ft.SnackBar(ft.Text("Start updated."), open=True)
+                    except ValueError as err:
+                        page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                    _refresh_activities()
+                    page.update()
+
+                def _on_activity_end_blur(eid: int, s: str):
+                    entry = next((x for x in self.db.get_time_entries_for_day(today) if x.id == eid), None)
+                    if not entry:
+                        return
+                    if (s or "").strip() in ("", "—", "Running"):
+                        return
+                    t = parse_time(s)
+                    if t is None:
+                        return
+                    day = entry.start_time.date()
+                    new_end = datetime.combine(day, t)
+                    new_dur = (new_end - entry.start_time).total_seconds()
+                    if new_dur < 0:
+                        page.snack_bar = ft.SnackBar(ft.Text("End must be after start."), open=True)
+                        page.update()
+                        return
+                    try:
+                        self.db.update_time_entry(eid, start_time=entry.start_time, end_time=new_end)
+                        page.snack_bar = ft.SnackBar(ft.Text("End updated."), open=True)
+                    except ValueError as err:
+                        page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                    _refresh_activities()
+                    page.update()
+
+                def _on_activity_duration_blur(eid: int, s: str):
+                    entry = next((x for x in self.db.get_time_entries_for_day(today) if x.id == eid), None)
+                    if not entry:
+                        return
+                    hours = parse_duration_hours(s or "")
+                    if hours is None or hours < 0:
+                        return
+                    new_dur = hours * 3600.0
+                    new_end = entry.start_time + timedelta(seconds=new_dur)
+                    try:
+                        self.db.update_time_entry(eid, start_time=entry.start_time, duration_seconds=new_dur)
+                        page.snack_bar = ft.SnackBar(ft.Text("Duration updated."), open=True)
+                    except ValueError as err:
+                        page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                    _refresh_activities()
+                    page.update()
+
+                rows.append(
+                    ft.Row(
+                        [matter_dd, start_tf, end_tf, duration_tf],
+                        spacing=12,
+                        alignment=ft.MainAxisAlignment.START,
+                    )
+                )
+
+            if not rows:
+                return [ft.Text("No activities recorded today. Start the timer or add a manual entry below.", size=14)]
+            header = ft.Row(
+                [
+                    ft.Text("Matter", size=12, weight=ft.FontWeight.W_500, width=220),
+                    ft.Text("Start", size=12, weight=ft.FontWeight.W_500, width=70),
+                    ft.Text("End", size=12, weight=ft.FontWeight.W_500, width=70),
+                    ft.Text("Duration", size=12, weight=ft.FontWeight.W_500, width=80),
+                ],
+                spacing=12,
+            )
+            return [header] + rows
+
+        def refresh_activities():
+            if activities_list_ref.current:
+                activities_list_ref.current.controls = _build_activities_rows()
+                page.update()
+
+        page.data["refresh_timer_activities"] = refresh_activities
+
+        entries_today = self.db.get_time_entries_for_day(today)
+        initial_activities_controls: list[ft.Control] = (
+            _build_activities_rows() if entries_today else [ft.Text("No activities recorded today. Start the timer or add a manual entry below.", size=14)]
+        )
+        activities_list_column = ft.Column(
+            ref=activities_list_ref,
+            controls=initial_activities_controls,
+            scroll=ft.ScrollMode.AUTO,
+        )
+        activities_list_container = ft.Container(
+            content=activities_list_column,
+            height=280,
+        )
+
+        activities_section = ft.Container(
+            content=ft.Column(
+                [
+                    ft.Text("Today's activities", size=18, weight=ft.FontWeight.W_500),
+                    ft.Container(height=8),
+                    activities_list_container,
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.START,
+            ),
+            padding=ft.Padding.only(bottom=16),
+        )
 
         description_ref = ft.Ref[ft.TextField]()
         manual_desc_ref = ft.Ref[ft.TextField]()
@@ -388,6 +592,9 @@ class SentinelApp:
             entry = self.db.stop_timer()
             if entry and timer_label.current:
                 timer_label.current.value = format_elapsed(entry.duration_seconds)
+            refresh = page.data.get("refresh_timer_activities")
+            if callable(refresh):
+                refresh()
             page.update()
 
         def _update_manual_derived(_=None):
@@ -434,6 +641,9 @@ class SentinelApp:
             if manual_duration_ref.current:
                 manual_duration_ref.current.value = ""
             _update_manual_derived()
+            refresh = page.data.get("refresh_timer_activities")
+            if callable(refresh):
+                refresh()
             page.snack_bar = ft.SnackBar(ft.Text("Manual entry added to selected matter."), open=True)
             page.update()
 
@@ -539,6 +749,7 @@ class SentinelApp:
         timer_controls = [
             ft.Text("Timer", size=24, weight=ft.FontWeight.BOLD),
             ft.Container(height=16),
+            activities_section,
         ]
         if not options:
             timer_controls.append(
@@ -858,11 +1069,7 @@ class SentinelApp:
             if move_dialog_ref.current:
                 move_dialog_ref.current.open = False
             refresh_list()
-            if parent_dropdown.current:
-                path_options = self.db.get_matters_with_full_paths()
-                parent_dropdown.current.options = [
-                    ft.DropdownOption(key=str(mid), text=path) for mid, path in path_options
-                ]
+            refresh_parent_dropdown()
             if on_matters_changed:
                 on_matters_changed()
             page.snack_bar = ft.SnackBar(ft.Text("Matter moved."), open=True)
@@ -904,11 +1111,7 @@ class SentinelApp:
             if merge_dialog_ref.current:
                 merge_dialog_ref.current.open = False
             refresh_list()
-            if parent_dropdown.current:
-                path_options = self.db.get_matters_with_full_paths()
-                parent_dropdown.current.options = [
-                    ft.DropdownOption(key=str(mid), text=path) for mid, path in path_options
-                ]
+            refresh_parent_dropdown()
             if on_matters_changed:
                 on_matters_changed()
             page.snack_bar = ft.SnackBar(ft.Text("Matters merged."), open=True)
@@ -1094,19 +1297,25 @@ class SentinelApp:
             if parent_dropdown.current:
                 parent_dropdown.current.value = None
             refresh_list()
-            # Refresh parent dropdown so the new matter can be selected as parent
+            refresh_parent_dropdown()
+            if on_matters_changed:
+                on_matters_changed()
+            page.update()
+    
+        def refresh_parent_dropdown():
+            """Reload parent dropdown options from DB so new clients/matters appear immediately."""
             if parent_dropdown.current:
                 path_options = self.db.get_matters_with_full_paths()
                 parent_dropdown.current.options = [
                     ft.DropdownOption(key=str(mid), text=path) for mid, path in path_options
                 ]
-            page.update()
-    
+
         def on_type_change(e):
             if parent_section_ref.current and add_type_ref.current:
-                parent_section_ref.current.visible = (
-                    add_type_ref.current.selected and add_type_ref.current.selected[0] == "matter"
-                )
+                is_matter = add_type_ref.current.selected and add_type_ref.current.selected[0] == "matter"
+                parent_section_ref.current.visible = is_matter
+                if is_matter:
+                    refresh_parent_dropdown()
                 page.update()
     
         def on_search(e):
