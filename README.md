@@ -28,6 +28,8 @@ Matters support unlimited nesting (Client → Project → Subproject…). Time c
    # or: venv\Scripts\activate  on Windows
    ```
 
+   If you are on Linux, you can try the `run.sh` script to create the virtual environment.
+
 3. **Install dependencies**
    ```bash
    pip install flet sqlalchemy
