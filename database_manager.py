@@ -38,23 +38,32 @@ class DatabaseManager:
         self._session_factory = sessionmaker(
             bind=self._engine, autocommit=False, autoflush=False
         )
-        # Postgres: set app.current_user_id on each connection checkout so RLS sees the user
-        if self._engine.dialect.name == "postgresql" and current_user_id is not None:
-            uid = str(current_user_id)
+        self._setup_postgres_pool_checkout()
 
-            @event.listens_for(self._engine.pool, "checkout")
-            def _pool_checkout(dbapi_connection, connection_record, connection_proxy):
-                cursor = dbapi_connection.cursor()
-                try:
-                    cursor.execute(
-                        "SELECT set_config('app.current_user_id', %s, true)", (uid,)
-                    )
-                finally:
-                    cursor.close()
-                try:
-                    dbapi_connection.commit()
-                except Exception:
-                    pass
+    @property
+    def current_user_id(self) -> int | None:
+        """Current user id for this manager (read-only)."""
+        return self._current_user_id
+
+    def _setup_postgres_pool_checkout(self) -> None:
+        """Register pool checkout to set app.current_user_id (called from __init__ when Postgres)."""
+        if self._engine.dialect.name != "postgresql" or self._current_user_id is None:
+            return
+        uid = str(self._current_user_id)
+
+        @event.listens_for(self._engine.pool, "checkout")
+        def _pool_checkout(dbapi_connection, connection_record, connection_proxy):
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute(
+                    "SELECT set_config('app.current_user_id', %s, true)", (uid,)
+                )
+            finally:
+                cursor.close()
+            try:
+                dbapi_connection.commit()
+            except Exception:
+                pass
 
     @contextmanager
     def _session(self) -> Generator[Session, None, None]:

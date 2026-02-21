@@ -71,7 +71,7 @@ Flet runs on Windows, macOS, Linux, web, and mobile. To build an Android APK, us
 
 ## User administration and admin user
 
-- **What it is:** The app is multi-user. Each user sees only their own matters and time entries. At least one user can be **admin**: they can create, edit, and delete other users; normal users can only change their own login data (username/password). There is no in-app “User administration” screen yet—the backend supports it (`list_users`, `create_user`, `update_user`, `delete_user`), so a future version could add a settings or admin tab.
+- **What it is:** The app is multi-user. Each user sees only their own matters and time entries. At least one user can be **admin**: they can create, edit, and delete other users; normal users can only change their own login data (username/password). Admins get a **Users** tab in the navigation (people icon) where they can add users (username, password, optional Admin flag), edit any user (username, password, and Admin flag for others), and delete other users (you cannot delete yourself).
 
 - **How to get the admin user:** On first install, when there are no users in the database, the app shows a **“Create first admin”** screen: enter username and password and click **Create admin**. That user is created with admin rights and you are logged in. This works for both **SQLite** and **PostgreSQL** (no manual INSERT needed).
 
