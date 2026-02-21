@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 
 from database_manager import DatabaseManager, db
 
-__version__ = "v.0.0.1"
+__version__ = "v.0.0.2"
 
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 TIME_FMT = "%H:%M"
