@@ -1,5 +1,6 @@
 """
 Sentinel Solo: Flet UI with Timer and Manage Matters.
+Multi-user: login required; each user sees only their matters and time entries.
 """
 import asyncio
 import json
@@ -9,12 +10,17 @@ from pathlib import Path
 from typing import Callable
 
 import flet as ft
+import bcrypt
 
 from sqlalchemy.exc import IntegrityError
 
 from database_manager import DatabaseManager, db
 
 __version__ = "v.0.0.3"
+
+# Storage keys for persisted login (optional restore)
+STORAGE_USER_ID = "user_id"
+STORAGE_USERNAME = "username"
 
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 TIME_FMT = "%H:%M"
@@ -116,7 +122,12 @@ class SentinelApp:
         self.body_ref: ft.Ref[ft.Container] = ft.Ref()
         self.expanded_clients: set[str] = set()
 
-    def setup(self) -> None:
+    def setup(
+        self,
+        *,
+        logout_callback: Callable[[], None] | None = None,
+        current_username: str = "",
+    ) -> None:
         page = self.page
         page.theme_mode = ft.ThemeMode.DARK
         page.title = f"Sentinel Solo {__version__}"
@@ -180,35 +191,54 @@ class SentinelApp:
             else:
                 show_timesheet(e)
 
+        destinations = [
+            ft.NavigationRailDestination(
+                icon=ft.Icons.TIMER,
+                selected_icon=ft.Icons.TIMER,
+                label="Timer",
+            ),
+            ft.NavigationRailDestination(
+                icon=ft.Icons.FOLDER_OPEN,
+                selected_icon=ft.Icons.FOLDER_OPEN,
+                label="Manage Matters",
+            ),
+            ft.NavigationRailDestination(
+                icon=ft.Icons.ASSESSMENT,
+                selected_icon=ft.Icons.ASSESSMENT,
+                label="Reporting",
+            ),
+            ft.NavigationRailDestination(
+                icon=ft.Icons.UPLOAD,
+                selected_icon=ft.Icons.UPLOAD,
+                label="Timesheet",
+            ),
+        ]
+        if logout_callback:
+            destinations.append(
+                ft.NavigationRailDestination(
+                    icon=ft.Icons.LOGOUT,
+                    selected_icon=ft.Icons.LOGOUT,
+                    label="Log out",
+                ),
+            )
         rail = ft.NavigationRail(
             selected_index=0,
             extended=True,
             min_extended_width=180,
             label_type=ft.NavigationRailLabelType.ALL,
-            destinations=[
-                ft.NavigationRailDestination(
-                    icon=ft.Icons.TIMER,
-                    selected_icon=ft.Icons.TIMER,
-                    label="Timer",
-                ),
-                ft.NavigationRailDestination(
-                    icon=ft.Icons.FOLDER_OPEN,
-                    selected_icon=ft.Icons.FOLDER_OPEN,
-                    label="Manage Matters",
-                ),
-                ft.NavigationRailDestination(
-                    icon=ft.Icons.ASSESSMENT,
-                    selected_icon=ft.Icons.ASSESSMENT,
-                    label="Reporting",
-                ),
-                ft.NavigationRailDestination(
-                    icon=ft.Icons.UPLOAD,
-                    selected_icon=ft.Icons.UPLOAD,
-                    label="Timesheet",
-                ),
-            ],
+            destinations=destinations,
             on_change=on_rail_change,
         )
+
+        def _on_rail_change_with_logout(e):
+            if logout_callback and e.control.selected_index == len(destinations) - 1:
+                e.control.selected_index = 0
+                page.update()
+                logout_callback()
+                return
+            on_rail_change(e)
+
+        rail.on_change = _on_rail_change_with_logout
 
         body = ft.Container(ref=self.body_ref, content=timer_container, expand=True)
 
@@ -1887,10 +1917,216 @@ class SentinelApp:
         )
 
 
-def main(page: ft.Page) -> None:
-    db.init_db()
-    app = SentinelApp(page, db)
-    app.setup()
+def _build_create_first_admin_view(
+    page: ft.Page,
+    login_db: DatabaseManager,
+    on_success: Callable[[int, str], None],
+) -> ft.Control:
+    """Build 'Create first admin' form when no users exist. On success call on_success(user_id, username)."""
+    username_field = ft.TextField(
+        label="Username (admin)",
+        autofocus=True,
+        text_align=ft.TextAlign.LEFT,
+        width=300,
+    )
+    password_field = ft.TextField(
+        label="Password",
+        password=True,
+        can_reveal_password=True,
+        text_align=ft.TextAlign.LEFT,
+        width=300,
+    )
+    error_text = ft.Text("", color=ft.Colors.RED, visible=False)
+    loading = ft.ProgressRing(visible=False)
+
+    def _do_create(_):
+        username = (username_field.value or "").strip()
+        password = (password_field.value or "").strip()
+        if not username or not password:
+            error_text.value = "Enter username and password."
+            error_text.visible = True
+            loading.visible = False
+            page.update()
+            return
+        if len(password) < 4:
+            error_text.value = "Password must be at least 4 characters."
+            error_text.visible = True
+            loading.visible = False
+            page.update()
+            return
+        error_text.visible = False
+        loading.visible = True
+        page.update()
+        try:
+            pw_hash = bcrypt.hashpw(
+                password.encode("utf-8"), bcrypt.gensalt()
+            ).decode("utf-8")
+            user_id = login_db.create_first_admin(username, pw_hash)
+        except Exception as e:
+            error_text.value = str(e) or "Failed to create admin."
+            error_text.visible = True
+            loading.visible = False
+            page.update()
+            return
+        if user_id is None:
+            error_text.value = "A user already exists. Use the login form."
+            error_text.visible = True
+            loading.visible = False
+            page.update()
+            return
+        loading.visible = False
+        page.update()
+        on_success(user_id, username)
+
+    password_field.on_submit = _do_create
+    create_btn = ft.ElevatedButton("Create admin", on_click=_do_create)
+    return ft.Column(
+        [
+            ft.Text("Sentinel Solo", size=28, weight=ft.FontWeight.BOLD),
+            ft.Container(height=8),
+            ft.Text("No users yet. Create the first admin account.", size=14),
+            ft.Container(height=24),
+            username_field,
+            ft.Container(height=12),
+            password_field,
+            ft.Container(height=12),
+            error_text,
+            ft.Container(height=12),
+            ft.Row([loading, create_btn], spacing=12),
+        ],
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        alignment=ft.MainAxisAlignment.CENTER,
+        expand=True,
+    )
+
+
+def _build_login_view(
+    page: ft.Page,
+    login_db: DatabaseManager,
+    on_success: Callable[[int, str], None],  # sync; can schedule async work via page.run_task
+) -> ft.Control:
+    """Build login form: username, password, Log in. On success call on_success(user_id, username)."""
+    username_field = ft.TextField(
+        label="Username",
+        autofocus=True,
+        text_align=ft.TextAlign.LEFT,
+        width=300,
+    )
+    password_field = ft.TextField(
+        label="Password",
+        password=True,
+        can_reveal_password=True,
+        text_align=ft.TextAlign.LEFT,
+        width=300,
+    )
+    error_text = ft.Text("", color=ft.Colors.RED, visible=False)
+    loading = ft.ProgressRing(visible=False)
+
+    def _do_login(_):
+        username = (username_field.value or "").strip()
+        password = (password_field.value or "").strip()
+        if not username or not password:
+            error_text.value = "Enter username and password."
+            error_text.visible = True
+            loading.visible = False
+            page.update()
+            return
+        error_text.visible = False
+        loading.visible = True
+        page.update()
+        try:
+            creds = login_db.get_login_credentials(username)
+            if creds and bcrypt.checkpw(
+                password.encode("utf-8"),
+                creds[1].encode("utf-8") if isinstance(creds[1], str) else creds[1],
+            ):
+                user_id = creds[0]
+            else:
+                user_id = None
+        except Exception:
+            user_id = None
+        if user_id is None:
+            error_text.value = "Invalid username or password."
+            error_text.visible = True
+            loading.visible = False
+            page.update()
+            return
+        loading.visible = False
+        page.update()
+        on_success(user_id, username)
+
+    password_field.on_submit = _do_login
+    login_btn = ft.ElevatedButton("Log in", on_click=_do_login)
+    return ft.Column(
+        [
+            ft.Text("Sentinel Solo", size=28, weight=ft.FontWeight.BOLD),
+            ft.Container(height=24),
+            username_field,
+            ft.Container(height=12),
+            password_field,
+            ft.Container(height=12),
+            error_text,
+            ft.Container(height=12),
+            ft.Row([loading, login_btn], spacing=12),
+        ],
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        alignment=ft.MainAxisAlignment.CENTER,
+        expand=True,
+    )
+
+
+async def main(page: ft.Page) -> None:
+    login_db = DatabaseManager()
+    login_db.init_db()
+
+    async def go_main(user_id: int, username: str) -> None:
+        await page.shared_preferences.set(STORAGE_USER_ID, str(user_id))
+        await page.shared_preferences.set(STORAGE_USERNAME, username)
+        page.controls.clear()
+        user_db = DatabaseManager(current_user_id=user_id)
+        app = SentinelApp(page, user_db)
+        app.setup(
+            logout_callback=show_login,
+            current_username=username,
+        )
+        page.update()
+
+    async def _go_main_task(uid: int, uname: str) -> None:
+        await go_main(uid, uname)
+
+    def on_login_success(uid: int, uname: str) -> None:
+        page.run_task(_go_main_task, uid, uname)
+
+    def show_login() -> None:
+        page.controls.clear()
+        if page.data is not None:
+            page.data.pop("app", None)
+        # If no users exist, show "Create first admin" instead of login
+        if not login_db.has_any_user():
+            view = _build_create_first_admin_view(
+                page,
+                login_db,
+                on_success=on_login_success,
+            )
+        else:
+            view = _build_login_view(
+                page,
+                login_db,
+                on_success=on_login_success,
+            )
+        page.add(ft.SafeArea(ft.Container(view, expand=True)))
+        page.update()
+
+    stored_id = await page.shared_preferences.get(STORAGE_USER_ID)
+    if stored_id is not None:
+        try:
+            uid = int(stored_id)
+            username = await page.shared_preferences.get(STORAGE_USERNAME) or ""
+            await go_main(uid, username)
+            return
+        except (ValueError, TypeError):
+            pass
+    show_login()
 
 
 if __name__ == "__main__":

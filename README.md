@@ -31,6 +31,8 @@ Matters support unlimited nesting (Client → Project → Subproject…). Time c
 
    On Linux you can use **run.sh**: it runs the app with the project venv (and creates the venv if missing; the script will prompt you to run `python3 -m venv venv && ./venv/bin/pip install -r requirements.txt`).
 
+   **Linux installer (optional):** run `./install.sh` to install under `~/.local` (venv, launcher `sentinel-solo`, and a desktop menu entry). Use `./install.sh --prefix /usr/local` for a system-wide install (may require sudo for directory creation). To remove: `./uninstall.sh` (or `./uninstall.sh --prefix /usr/local` if you installed system-wide).
+
 3. **Install dependencies**
    ```bash
    pip install -r requirements.txt
@@ -43,7 +45,7 @@ Matters support unlimited nesting (Client → Project → Subproject…). Time c
    ```
    On Linux: `./run.sh` (uses the project venv and sets `XCURSOR_THEME` to avoid cursor theme warnings if needed).
 
-The first run creates a SQLite database (`sentinel.db`) in the project directory.
+The first run creates a SQLite database (`sentinel.db`) in the project directory. If no users exist, the app shows a **Create first admin** form so you can choose username and password for the initial admin (see below).
 
 **Optional: remote PostgreSQL**  
 To use a shared remote database (e.g. for multiple devices or Android), set the **`DATABASE_URL`** environment variable to a PostgreSQL connection string before starting the app:
@@ -64,6 +66,14 @@ Flet runs on Windows, macOS, Linux, web, and mobile. To build an Android APK, us
 - **database_manager.py** – DB access: matters, time entries, move/merge, get/update/add time entries, get time for day, suggest unique code, timesheet export.
 - **models.py** – SQLAlchemy models: `Matter` (tree via `parent_id`), `TimeEntry` (linked to matter).
 - **run.sh** – Linux launcher: runs the app with the project venv and optional cursor theme env vars.
+- **install.sh** – Linux installer: installs app under `~/.local` (or `--prefix`), creates venv, adds `sentinel-solo` launcher and desktop menu entry.
+- **uninstall.sh** – Linux uninstaller: removes the installed app dir, launcher, and desktop entry (use same `--prefix` as for install).
+
+## User administration and admin user
+
+- **What it is:** The app is multi-user. Each user sees only their own matters and time entries. At least one user can be **admin**: they can create, edit, and delete other users; normal users can only change their own login data (username/password). There is no in-app “User administration” screen yet—the backend supports it (`list_users`, `create_user`, `update_user`, `delete_user`), so a future version could add a settings or admin tab.
+
+- **How to get the admin user:** On first install, when there are no users in the database, the app shows a **“Create first admin”** screen: enter username and password and click **Create admin**. That user is created with admin rights and you are logged in. This works for both **SQLite** and **PostgreSQL** (no manual INSERT needed).
 
 ## Usage notes
 
