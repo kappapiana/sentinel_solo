@@ -245,6 +245,9 @@ class SentinelApp:
                     label="Log out",
                 ),
             )
+        if page.data is None:
+            page.data = {}
+        page.data["logout_callback"] = logout_callback
         rail = ft.NavigationRail(
             selected_index=0,
             extended=True,
@@ -2240,7 +2243,147 @@ class SentinelApp:
         page.overlay.append(edit_dialog)
         page.overlay.append(delete_confirm_dialog)
 
+        # Database backup (admin only - this is the Users tab)
+        def _default_backup_dir() -> Path:
+            downloads = Path.home() / "Downloads"
+            if downloads.is_dir():
+                return downloads
+            exports_dir = Path(__file__).resolve().parent / "exports"
+            exports_dir.mkdir(exist_ok=True)
+            return exports_dir
+
+        backup_export_dir_ref = ft.Ref[ft.TextField]()
+        backup_import_path_ref = ft.Ref[ft.TextField]()
+
+        def _do_backup_export(_):
+            if not db.current_user_is_admin():
+                page.snack_bar = ft.SnackBar(content=ft.Text("Only admin can export the full database."))
+                page.snack_bar.open = True
+                page.update()
+                return
+            try:
+                data = db.export_full_database()
+            except ValueError as e:
+                page.snack_bar = ft.SnackBar(content=ft.Text(str(e)))
+                page.snack_bar.open = True
+                page.update()
+                return
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            default_name = f"sentinel_backup_{timestamp}.json"
+            dir_str = (backup_export_dir_ref.current.value or "").strip() if backup_export_dir_ref.current else ""
+            export_dir = Path(dir_str).expanduser() if dir_str else _default_backup_dir()
+            try:
+                export_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as err:
+                page.snack_bar = ft.SnackBar(content=ft.Text(f"Cannot create folder: {err}"))
+                page.snack_bar.open = True
+                page.update()
+                return
+            out_path = export_dir / default_name
+            try:
+                out_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            except OSError as err:
+                page.snack_bar = ft.SnackBar(content=ft.Text(f"Cannot save file: {err}"))
+                page.snack_bar.open = True
+                page.update()
+                return
+            page.snack_bar = ft.SnackBar(content=ft.Text(f"Backup saved to {out_path}"))
+            page.snack_bar.open = True
+            page.update()
+
+        import_confirm_dialog_ref: list = []
+
+        def _do_import_confirm(_):
+            if not import_confirm_dialog_ref:
+                return
+            path_str = (backup_import_path_ref.current.value or "").strip() if backup_import_path_ref.current else ""
+            if not path_str:
+                page.snack_bar = ft.SnackBar(content=ft.Text("Enter the path to the backup file."))
+                page.snack_bar.open = True
+                page.update()
+                return
+            path = Path(path_str).expanduser()
+            if not path.is_file():
+                page.snack_bar = ft.SnackBar(content=ft.Text(f"File not found: {path}"))
+                page.snack_bar.open = True
+                page.update()
+                return
+            try:
+                raw = path.read_text(encoding="utf-8")
+                data = json.loads(raw)
+            except (OSError, json.JSONDecodeError) as e:
+                page.snack_bar = ft.SnackBar(content=ft.Text(f"Invalid backup file: {e}"))
+                page.snack_bar.open = True
+                page.update()
+                return
+            try:
+                db.import_full_database(data)
+            except ValueError as e:
+                page.snack_bar = ft.SnackBar(content=ft.Text(str(e)))
+                page.snack_bar.open = True
+                page.update()
+                return
+            except Exception as e:
+                page.snack_bar = ft.SnackBar(content=ft.Text(f"Import failed: {e}"))
+                page.snack_bar.open = True
+                page.update()
+                return
+            close_dialog(import_confirm_dialog_ref[0])
+            page.snack_bar = ft.SnackBar(content=ft.Text("Database restored. Please log in again."))
+            page.snack_bar.open = True
+            page.update()
+            # Clear stored login and show login view
+            async def _clear_and_logout():
+                await page.shared_preferences.set(STORAGE_USER_ID, "")
+                await page.shared_preferences.set(STORAGE_USERNAME, "")
+                cb = (page.data or {}).get("logout_callback")
+                if cb:
+                    cb()
+
+            page.run_task(_clear_and_logout)
+
+        def _open_import_confirm(_):
+            path_str = (backup_import_path_ref.current.value or "").strip() if backup_import_path_ref.current else ""
+            if not path_str:
+                page.snack_bar = ft.SnackBar(content=ft.Text("Enter the path to the backup file."))
+                page.snack_bar.open = True
+                page.update()
+                return
+            path = Path(path_str).expanduser()
+            if not path.is_file():
+                page.snack_bar = ft.SnackBar(content=ft.Text(f"File not found: {path}"))
+                page.snack_bar.open = True
+                page.update()
+                return
+            import_confirm_dialog.open = True
+            page.update()
+
+        import_confirm_btn = ft.ElevatedButton("Import", on_click=_do_import_confirm)
+        import_cancel_btn = ft.TextButton("Cancel", on_click=lambda _: close_dialog(import_confirm_dialog))
+        import_confirm_dialog = ft.AlertDialog(
+            title=ft.Text("Import full database?"),
+            content=ft.Text("This will replace all users, matters, and time entries with the backup. Continue?"),
+            actions=[import_cancel_btn, import_confirm_btn],
+        )
+        import_confirm_dialog_ref.append(import_confirm_dialog)
+        page.overlay.append(import_confirm_dialog)
+
         list_col = ft.Column(ref=users_list_ref, controls=build_user_rows(), scroll=ft.ScrollMode.AUTO)
+
+        backup_export_dir_field = ft.TextField(
+            label="Save to folder",
+            value=str(_default_backup_dir()),
+            width=500,
+            ref=backup_export_dir_ref,
+            hint_text="Folder for backup file",
+        )
+        backup_import_path_field = ft.TextField(
+            label="Backup file path",
+            value="",
+            width=500,
+            ref=backup_import_path_ref,
+            hint_text="Full path to sentinel_backup_YYYYMMDD_HHMMSS.json",
+        )
 
         return ft.Column(
             [
@@ -2251,9 +2394,20 @@ class SentinelApp:
                 ft.Text("Users", size=16, weight=ft.FontWeight.W_500),
                 ft.Container(height=8),
                 ft.Container(content=list_col, expand=True),
+                ft.Container(height=24),
+                ft.Text("Database backup", size=18, weight=ft.FontWeight.W_500),
+                ft.Container(height=8),
+                backup_export_dir_field,
+                ft.Container(height=4),
+                ft.ElevatedButton("Export full database", icon=ft.Icons.SAVE, on_click=_do_backup_export),
+                ft.Container(height=16),
+                backup_import_path_field,
+                ft.Container(height=4),
+                ft.ElevatedButton("Import full database", icon=ft.Icons.UPLOAD, on_click=_open_import_confirm),
             ],
             expand=True,
             horizontal_alignment=ft.CrossAxisAlignment.START,
+            scroll=ft.ScrollMode.AUTO,
         )
 
 

@@ -91,6 +91,15 @@ Fixtures in `tests/conftest.py` use a temporary SQLite database and two users (a
 
 - **How to get the admin user:** On first install, when there are no users in the database, the app shows a **“Create first admin”** screen: enter username and password and click **Create admin**. That user is created with admin rights and you are logged in. This works for both **SQLite** and **PostgreSQL** (no manual INSERT needed).
 
+## Backup and restore
+
+Admins can export and import the full database from the **Users** tab (Database backup section at the bottom).
+
+- **Export full database:** Set “Save to folder” (default: Downloads or `exports/`), then click **Export full database**. A file `sentinel_backup_YYYYMMDD_HHMMSS.json` is written with all users, matters, and time entries. Use this for backups or before a reinstall.
+- **Import full database:** Enter the full path to a backup JSON file, then click **Import full database**. Confirm the dialog: this **replaces** all current users, matters, and time entries with the backup. After a successful import you are logged out and must log in again. The same backup format works for both SQLite and PostgreSQL.
+
+Recommend closing other sessions before restoring and re-logging in after.
+
 ## Usage notes
 
 - **Today’s activities (Timer tab):** Edit Matter, Description, Start, End, or Duration in place. Changes are saved on blur; end/duration/start are linked as above. Duration is shown as H:MM (no seconds).

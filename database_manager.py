@@ -239,6 +239,42 @@ class DatabaseManager:
             conn.execute(
                 text(
                     """
+                    DROP POLICY IF EXISTS time_entries_admin_delete ON time_entries;
+                    CREATE POLICY time_entries_admin_delete ON time_entries FOR DELETE
+                    USING (app.current_user_is_admin())
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    DROP POLICY IF EXISTS time_entries_admin_insert ON time_entries;
+                    CREATE POLICY time_entries_admin_insert ON time_entries FOR INSERT
+                    WITH CHECK (app.current_user_is_admin())
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    DROP POLICY IF EXISTS matters_admin_delete ON matters;
+                    CREATE POLICY matters_admin_delete ON matters FOR DELETE
+                    USING (app.current_user_is_admin())
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    DROP POLICY IF EXISTS matters_admin_insert ON matters;
+                    CREATE POLICY matters_admin_insert ON matters FOR INSERT
+                    WITH CHECK (app.current_user_is_admin())
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
                     DROP POLICY IF EXISTS users_select ON users;
                     CREATE POLICY users_select ON users FOR SELECT
                     USING (id::text = current_setting('app.current_user_id', true) OR app.current_user_is_admin())
@@ -600,6 +636,134 @@ class DatabaseManager:
                 {TimeEntry.invoiced: True}, synchronize_session=False
             )
             session.commit()
+
+    BACKUP_VERSION = 1
+
+    def export_full_database(self) -> dict:
+        """
+        Export full database as a portable JSON-serializable dict. Admin only.
+        Returns {"version": 1, "exported_at": "<iso>", "users": [...], "matters": [...], "time_entries": [...]}.
+        """
+        self._require_user()
+        with self._session() as session:
+            if not self._is_admin(session):
+                raise ValueError("Only admin can export the full database.")
+            # Unscoped reads (admin sees all via RLS on Postgres; on SQLite we use raw query)
+            if self._engine.dialect.name == "sqlite":
+                users = session.query(User).order_by(User.id).all()
+                matters = session.query(Matter).order_by(Matter.id).all()
+                entries = session.query(TimeEntry).order_by(TimeEntry.id).all()
+            else:
+                users = session.query(User).order_by(User.id).all()
+                matters = session.query(Matter).order_by(Matter.id).all()
+                entries = session.query(TimeEntry).order_by(TimeEntry.id).all()
+        return {
+            "version": self.BACKUP_VERSION,
+            "exported_at": datetime.now().isoformat(),
+            "users": [
+                {
+                    "id": u.id,
+                    "username": u.username,
+                    "password_hash": u.password_hash,
+                    "is_admin": bool(u.is_admin),
+                }
+                for u in users
+            ],
+            "matters": [
+                {
+                    "id": m.id,
+                    "owner_id": m.owner_id,
+                    "matter_code": m.matter_code,
+                    "name": m.name,
+                    "parent_id": m.parent_id,
+                }
+                for m in matters
+            ],
+            "time_entries": [
+                {
+                    "id": e.id,
+                    "owner_id": e.owner_id,
+                    "matter_id": e.matter_id,
+                    "description": e.description or "",
+                    "start_time": e.start_time.isoformat() if e.start_time else None,
+                    "end_time": e.end_time.isoformat() if e.end_time else None,
+                    "duration_seconds": e.duration_seconds if e.duration_seconds is not None else 0.0,
+                    "invoiced": bool(e.invoiced),
+                }
+                for e in entries
+            ],
+        }
+
+    def import_full_database(self, data: dict) -> None:
+        """
+        Replace the current database with the backup data. Admin only.
+        data must have "version", "users", "matters", "time_entries".
+        """
+        self._require_user()
+        if not isinstance(data, dict):
+            raise ValueError("Invalid backup: not a dict.")
+        for key in ("version", "users", "matters", "time_entries"):
+            if key not in data:
+                raise ValueError(f"Invalid backup: missing '{key}'.")
+        if data.get("version") != self.BACKUP_VERSION:
+            raise ValueError(f"Unsupported backup version: {data.get('version')}.")
+        with self._session() as session:
+            if not self._is_admin(session):
+                raise ValueError("Only admin can import the full database.")
+            # Delete in FK order
+            session.query(TimeEntry).delete(synchronize_session=False)
+            session.query(Matter).delete(synchronize_session=False)
+            session.query(User).delete(synchronize_session=False)
+            session.flush()
+            # Insert preserving IDs
+            for row in data["users"]:
+                session.add(
+                    User(
+                        id=row["id"],
+                        username=row["username"],
+                        password_hash=row.get("password_hash"),
+                        is_admin=bool(row.get("is_admin", False)),
+                    )
+                )
+            session.flush()
+            for row in data["matters"]:
+                session.add(
+                    Matter(
+                        id=row["id"],
+                        owner_id=row["owner_id"],
+                        matter_code=row["matter_code"],
+                        name=row["name"],
+                        parent_id=row.get("parent_id"),
+                    )
+                )
+            session.flush()
+            for row in data["time_entries"]:
+                start_time = datetime.fromisoformat(row["start_time"]) if row.get("start_time") else None
+                end_time = datetime.fromisoformat(row["end_time"]) if row.get("end_time") else None
+                session.add(
+                    TimeEntry(
+                        id=row["id"],
+                        owner_id=row["owner_id"],
+                        matter_id=row["matter_id"],
+                        description=row.get("description") or "",
+                        start_time=start_time,
+                        end_time=end_time,
+                        duration_seconds=float(row.get("duration_seconds", 0) or 0),
+                        invoiced=bool(row.get("invoiced", False)),
+                    )
+                )
+            session.commit()
+        # Reset Postgres sequences so next auto-insert gets a valid id
+        if self._engine.dialect.name == "postgresql":
+            with self._session() as session:
+                for table, col in (("users", "id"), ("matters", "id"), ("time_entries", "id")):
+                    session.execute(
+                        text(
+                            f"SELECT setval(pg_get_serial_sequence(:t, :c), COALESCE((SELECT MAX({col}) FROM {table}), 1))"
+                        ),
+                        {"t": table, "c": col},
+                    )
+                session.commit()
 
     def _resolve_time_trio(
         self,

@@ -247,6 +247,65 @@ class TestOwnerFiltering:
         assert "User2" in entries[0]["matter_path"]
 
 
+# --- backup / restore ---
+
+
+class TestBackupRestore:
+    """Full database export and import (admin only)."""
+
+    def test_export_full_database_admin_returns_dict(self, db_user1: DatabaseManager, db_user2: DatabaseManager):
+        """Admin export returns dict with version, exported_at, users, matters, time_entries."""
+        db_user1.add_matter("C", "c", parent_id=None)
+        db_user2.add_matter("X", "x", parent_id=None)
+        data = db_user1.export_full_database()
+        assert data["version"] == DatabaseManager.BACKUP_VERSION
+        assert "exported_at" in data
+        assert len(data["users"]) == 2
+        assert len(data["matters"]) == 2
+        assert data["time_entries"] == []
+
+    def test_export_full_database_non_admin_raises(self, db_user2: DatabaseManager):
+        """Non-admin export raises ValueError."""
+        db_user2.add_matter("X", "x", parent_id=None)
+        with pytest.raises(ValueError, match="Only admin can export"):
+            db_user2.export_full_database()
+
+    def test_import_full_database_round_trip(self, db_user1: DatabaseManager, db_user2: DatabaseManager):
+        """Export then import preserves users, matters, and time entries."""
+        c = db_user1.add_matter("Client", "client", parent_id=None)
+        p = db_user1.add_matter("Project", "project", parent_id=c.id)
+        db_user1.start_timer(p.id, "Work")
+        db_user1.stop_timer()
+        data = db_user1.export_full_database()
+        assert len(data["users"]) >= 2
+        assert len(data["matters"]) >= 2
+        assert len(data["time_entries"]) >= 1
+        db_user1.import_full_database(data)
+        data2 = db_user1.export_full_database()
+        assert len(data2["users"]) == len(data["users"])
+        assert len(data2["matters"]) == len(data["matters"])
+        assert len(data2["time_entries"]) == len(data["time_entries"])
+        assert data2["users"][0]["username"] == data["users"][0]["username"]
+        assert data2["matters"][0]["name"] == data["matters"][0]["name"]
+
+    def test_import_full_database_invalid_data_raises(self, db_user1: DatabaseManager):
+        """Import with missing keys or bad version raises."""
+        with pytest.raises(ValueError, match="not a dict"):
+            db_user1.import_full_database([])
+        with pytest.raises(ValueError, match="missing"):
+            db_user1.import_full_database({"version": 1})
+        with pytest.raises(ValueError, match="Unsupported backup version"):
+            db_user1.import_full_database(
+                {"version": 99, "users": [], "matters": [], "time_entries": []}
+            )
+
+    def test_import_full_database_non_admin_raises(self, db_user2: DatabaseManager, db_user1: DatabaseManager):
+        """Non-admin cannot import."""
+        data = db_user1.export_full_database()
+        with pytest.raises(ValueError, match="Only admin can import"):
+            db_user2.import_full_database(data)
+
+
 # --- require_user ---
 
 
