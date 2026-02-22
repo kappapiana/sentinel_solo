@@ -1859,6 +1859,59 @@ class SentinelApp:
                 )
                 page.update()
 
+        # Pending export data for FilePicker callback: [payload, entry_ids] or None
+        pending_export: list = []
+
+        def _on_save_result(e: ft.FilePickerResultEvent):
+            if not e.path or not pending_export:
+                if not e.path and pending_export:
+                    page.snack_bar = ft.SnackBar(content=ft.Text("Export cancelled."))
+                    page.snack_bar.open = True
+                    page.update()
+                pending_export.clear()
+                return
+            payload, entry_ids = pending_export.pop()
+            out_path = Path(e.path)
+            try:
+                out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            except OSError as err:
+                page.snack_bar = ft.SnackBar(content=ft.Text(f"Could not save file: {err}"))
+                page.snack_bar.open = True
+                page.update()
+                return
+
+            def _on_mark_yes(_):
+                self.db.mark_entries_invoiced(entry_ids)
+                dialog.open = False
+                page.snack_bar = ft.SnackBar(content=ft.Text("Entries marked as invoiced."))
+                page.snack_bar.open = True
+                page.update()
+
+            def _on_mark_no(_):
+                dialog.open = False
+                page.update()
+
+            dialog = ft.AlertDialog(
+                title=ft.Text("Mark as invoiced?"),
+                content=ft.Text(
+                    f"Timesheet saved to {out_path}. Do you want to mark the exported entries as invoiced?"
+                ),
+                actions=[
+                    ft.TextButton("No", on_click=_on_mark_no),
+                    ft.ElevatedButton("Yes", on_click=_on_mark_yes),
+                ],
+            )
+            page.overlay.append(dialog)
+            dialog.open = True
+            page.update()
+
+        timesheet_file_picker = ft.FilePicker(on_result=_on_save_result)
+        if "timesheet_file_picker" not in (page.data or {}):
+            page.overlay.append(timesheet_file_picker)
+            if page.data is None:
+                page.data = {}
+            page.data["timesheet_file_picker"] = timesheet_file_picker
+
         def _do_export(_):
             if not timesheet_selected_ids:
                 page.snack_bar = ft.SnackBar(content=ft.Text("Select at least one matter"))
@@ -1884,36 +1937,13 @@ class SentinelApp:
                 "only_not_invoiced": only_not_invoiced,
                 "entries": entries,
             }
-            exports_dir = Path(__file__).resolve().parent / "exports"
-            exports_dir.mkdir(exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_path = exports_dir / f"timesheet_{timestamp}.json"
-            out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             entry_ids = [e["id"] for e in entries]
-
-            def _on_mark_yes(_):
-                self.db.mark_entries_invoiced(entry_ids)
-                dialog.open = False
-                page.snack_bar = ft.SnackBar(content=ft.Text("Entries marked as invoiced."))
-                page.snack_bar.open = True
-                page.update()
-
-            def _on_mark_no(_):
-                dialog.open = False
-                page.update()
-
-            dialog = ft.AlertDialog(
-                title=ft.Text("Mark as invoiced?"),
-                content=ft.Text(
-                    f"Timesheet exported to {out_path}. Do you want to mark the exported entries as invoiced?"
-                ),
-                actions=[
-                    ft.TextButton("No", on_click=_on_mark_no),
-                    ft.ElevatedButton("Yes", on_click=_on_mark_yes),
-                ],
-            )
-            page.overlay.append(dialog)
-            dialog.open = True
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            default_name = f"timesheet_{timestamp}.json"
+            pending_export.append((payload, entry_ids))
+            file_picker = page.data.get("timesheet_file_picker")
+            if file_picker:
+                file_picker.save_file(dialog_title="Save timesheet", file_name=default_name)
             page.update()
 
         search_field = ft.TextField(
