@@ -60,6 +60,16 @@ Create the database and tables on the server first (run the app once with that U
 **Cross-platform and Android**  
 Flet runs on Windows, macOS, Linux, web, and mobile. To build an Android APK, use Flet’s build tools (see [Flet docs](https://flet.dev/docs/)); install Android SDK/NDK as required and run the APK build command. The same codebase runs on desktop and mobile.
 
+## Tests
+
+From the project root (with venv activated):
+
+```bash
+pytest tests/ -v
+```
+
+The suite in `tests/test_database_manager.py` covers hierarchical matter creation, `get_full_path` accuracy, per-owner matter code suggestion, and RLS-style filtering (each user sees only their own matters and time entries). Fixtures in `tests/conftest.py` use a temporary SQLite database and two users.
+
 ## Project layout
 
 - **main.py** – Flet UI: Timer tab (today’s activities list + matter selector + timer/manual), Manage Matters tab, Reporting tab, Timesheet tab; dialogs for move/merge and time entries.
@@ -68,6 +78,7 @@ Flet runs on Windows, macOS, Linux, web, and mobile. To build an Android APK, us
 - **run.sh** – Linux launcher: runs the app with the project venv and optional cursor theme env vars.
 - **install.sh** – Linux installer: installs app under `~/.local` (or `--prefix`), creates venv, adds `sentinel-solo` launcher and desktop menu entry.
 - **uninstall.sh** – Linux uninstaller: removes the installed app dir, launcher, and desktop entry (use same `--prefix` as for install).
+- **tests/** – Pytest suite for `database_manager` (hierarchy, full paths, owner filtering); see **Tests** above.
 
 ## User administration and admin user
 
