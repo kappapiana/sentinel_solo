@@ -10,11 +10,13 @@ A desktop time-tracking app with a hierarchy of **clients** and **matters** (pro
 - **Manual entry** – Same matter selection; enter two of Start time, End time, or Duration; the third is derived. Add the entry to the selected matter.
 - **Manage Matters** – Add clients (roots) and matters (under a client or another matter). Per matter: **Move** (to another client or subproject), **Merge** (into another matter; time and children follow), **Time entries** (list, edit, add manual). New clients and matters appear in parent and timer lists immediately.
 - **Reporting** – Time by client and matter; clients collapsed by default, click to expand and see matter breakdown; optional search.
-- **Timesheet** – Select matters (searchable, folded by client; parent checkbox selects descendants). Export selected time entries to JSON; optionally mark exported entries as invoiced.
+- **Timesheet** – Select matters (searchable, folded by client; parent checkbox selects descendants). Choose where to save via the **Save to folder** field (default: Downloads or `exports/`). Export selected time entries to JSON; optionally mark exported entries as invoiced.
 
 Matters support unlimited nesting (Client → Project → Subproject…). Time can only be logged on non-root matters (i.e. under a client).
 
 ## Setup
+
+**Requirements:** Python 3.10+ (3.12 recommended).
 
 1. **Clone and enter the project**
    ```bash
@@ -68,7 +70,10 @@ From the project root (with venv activated):
 pytest tests/ -v
 ```
 
-The suite in `tests/test_database_manager.py` covers hierarchical matter creation, `get_full_path` accuracy, per-owner matter code suggestion, and RLS-style filtering (each user sees only their own matters and time entries). Fixtures in `tests/conftest.py` use a temporary SQLite database and two users.
+- **tests/test_database_manager.py** – Hierarchical matter creation, `get_full_path` accuracy, per-owner matter code suggestion, and RLS-style filtering (each user sees only their own matters and time entries).
+- **tests/test_regression.py** – User and matter creation, `get_full_path` recursion (multi-level hierarchy), privacy/RLS (one user cannot see another’s matters), and timer start/stop with correct duration calculation.
+
+Fixtures in `tests/conftest.py` use a temporary SQLite database and two users (admin + normal).
 
 ## Project layout
 
@@ -78,7 +83,7 @@ The suite in `tests/test_database_manager.py` covers hierarchical matter creatio
 - **run.sh** – Linux launcher: runs the app with the project venv and optional cursor theme env vars.
 - **install.sh** – Linux installer: installs app under `~/.local` (or `--prefix`), creates venv, adds `sentinel-solo` launcher and desktop menu entry.
 - **uninstall.sh** – Linux uninstaller: removes the installed app dir, launcher, and desktop entry (use same `--prefix` as for install).
-- **tests/** – Pytest suite for `database_manager` (hierarchy, full paths, owner filtering); see **Tests** above.
+- **tests/** – Pytest suite: `test_database_manager.py` (hierarchy, full paths, owner filtering), `test_regression.py` (user/matter creation, path recursion, RLS, timer duration); see **Tests** above.
 
 ## User administration and admin user
 
@@ -92,7 +97,7 @@ The suite in `tests/test_database_manager.py` covers hierarchical matter creatio
 - **Matter selection (Timer tab):** Search by name or path; all clients are listed (expand to see matters). All time (timer and manual) is logged to the matter selected there.
 - **Time entries (Manage Matters):** Open “Time entries” from a matter’s menu to see, edit, or add entries. When editing or adding, fill two of Start, End, and Duration; the third is computed.
 - **Move/Merge:** Use the matter menu (⋮) for “Move…” or “Merge…”. Target selection uses the same searchable, folded list as the Timer.
-- **Timesheet:** Check the matters whose time you want to export, then “Export timesheet” to save a JSON file (e.g. under `exports/`). You can optionally mark those entries as invoiced after export.
+- **Timesheet:** Set **Save to folder** to the directory where the file should go (default is your Downloads folder or the app’s `exports/` directory). Check the matters whose time you want to export, then click **Export timesheet** to save `timesheet_YYYYMMDD_HHMMSS.json` there. You can optionally mark those entries as invoiced after export.
 
 ## License
 

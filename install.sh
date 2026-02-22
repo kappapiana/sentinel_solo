@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install Sentinel Solo: copy app, create venv, install deps, add launcher and desktop entry.
 # Default: user install under ~/.local (no sudo). Use --prefix for system-wide.
+# Requires Python 3.10+ (3.12 recommended). Dependencies: flet, sqlalchemy, bcrypt; optional psycopg2 for PostgreSQL.
 
 set -e
 
@@ -56,17 +57,24 @@ mkdir -p "$DEST_DIR" "$BIN_DIR" "$APPS_DIR"
 echo "Installing Sentinel Solo to $DEST_DIR ..."
 
 # Copy app files (no venv, no __pycache__, no .git, no sentinel.db)
+# Prefer rsync; fallback: copy essential files only.
 rsync -a --exclude='venv' --exclude='.venv' --exclude='__pycache__' \
-      --exclude='.git' --exclude='sentinel.db' --exclude='*.pyc' \
+      --exclude='.git' --exclude='sentinel.db' --exclude='*.pyc' --exclude='.cursor' \
       "$SRC_DIR/" "$DEST_DIR/" 2>/dev/null || {
-    for f in main.py database_manager.py models.py requirements.txt run.sh; do
+    for f in main.py database_manager.py models.py requirements.txt run.sh README.md install.sh uninstall.sh; do
         [[ -f "$SRC_DIR/$f" ]] && cp "$SRC_DIR/$f" "$DEST_DIR/"
     done
+    [[ -d "$SRC_DIR/tests" ]] && cp -r "$SRC_DIR/tests" "$DEST_DIR/"
 }
 
 # Create venv and install dependencies
 echo "Creating virtual environment and installing dependencies..."
-"${PYTHON3:-python3}" -m venv "$DEST_DIR/venv"
+PYTHON="${PYTHON3:-python3}"
+if ! command -v "$PYTHON" &>/dev/null; then
+    echo "Error: $PYTHON not found. Install Python 3.10+ (3.12 recommended)." >&2
+    exit 1
+fi
+"$PYTHON" -m venv "$DEST_DIR/venv"
 "$DEST_DIR/venv/bin/pip" install -q --upgrade pip
 "$DEST_DIR/venv/bin/pip" install -q -r "$DEST_DIR/requirements.txt"
 
