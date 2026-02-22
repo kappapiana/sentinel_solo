@@ -1859,27 +1859,7 @@ class SentinelApp:
                 )
                 page.update()
 
-        # Pending export data for FilePicker callback: [payload, entry_ids] or None
-        pending_export: list = []
-
-        def _on_save_result(e: ft.FilePickerResultEvent):
-            if not e.path or not pending_export:
-                if not e.path and pending_export:
-                    page.snack_bar = ft.SnackBar(content=ft.Text("Export cancelled."))
-                    page.snack_bar.open = True
-                    page.update()
-                pending_export.clear()
-                return
-            payload, entry_ids = pending_export.pop()
-            out_path = Path(e.path)
-            try:
-                out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            except OSError as err:
-                page.snack_bar = ft.SnackBar(content=ft.Text(f"Could not save file: {err}"))
-                page.snack_bar.open = True
-                page.update()
-                return
-
+        def _show_mark_invoiced_dialog(out_path: Path, entry_ids: list):
             def _on_mark_yes(_):
                 self.db.mark_entries_invoiced(entry_ids)
                 dialog.open = False
@@ -1905,14 +1885,35 @@ class SentinelApp:
             dialog.open = True
             page.update()
 
-        timesheet_file_picker = ft.FilePicker(on_result=_on_save_result)
-        if "timesheet_file_picker" not in (page.data or {}):
+        def _write_and_confirm_export(out_path: Path, payload: dict, entry_ids: list) -> bool:
+            """Write payload to out_path and show mark-as-invoiced dialog. Returns True if written."""
+            try:
+                out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            except OSError as err:
+                page.snack_bar = ft.SnackBar(content=ft.Text(f"Could not save file: {err}"))
+                page.snack_bar.open = True
+                page.update()
+                return False
+            _show_mark_invoiced_dialog(out_path, entry_ids)
+            return True
+
+        def _default_export_dir() -> Path:
+            downloads = Path.home() / "Downloads"
+            if downloads.is_dir():
+                return downloads
+            exports_dir = Path(__file__).resolve().parent / "exports"
+            exports_dir.mkdir(exist_ok=True)
+            return exports_dir
+
+        # Flet 0.80+: FilePicker has no on_result; save_file() is async and returns the path
+        if page.data is None:
+            page.data = {}
+        if "timesheet_file_picker" not in page.data:
+            timesheet_file_picker = ft.FilePicker()
             page.overlay.append(timesheet_file_picker)
-            if page.data is None:
-                page.data = {}
             page.data["timesheet_file_picker"] = timesheet_file_picker
 
-        def _do_export(_):
+        async def _do_export(_):
             if not timesheet_selected_ids:
                 page.snack_bar = ft.SnackBar(content=ft.Text("Select at least one matter"))
                 page.snack_bar.open = True
@@ -1940,10 +1941,25 @@ class SentinelApp:
             entry_ids = [e["id"] for e in entries]
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             default_name = f"timesheet_{timestamp}.json"
-            pending_export.append((payload, entry_ids))
             file_picker = page.data.get("timesheet_file_picker")
-            if file_picker:
-                file_picker.save_file(dialog_title="Save timesheet", file_name=default_name)
+            initial_dir = str(_default_export_dir()) if not page.web else None
+            path = None
+            if file_picker and not page.web:
+                path = await file_picker.save_file(
+                    dialog_title="Save timesheet",
+                    file_name=default_name,
+                    initial_directory=initial_dir,
+                )
+            if path:
+                _write_and_confirm_export(Path(path), payload, entry_ids)
+            elif file_picker and not page.web:
+                page.snack_bar = ft.SnackBar(content=ft.Text("Export cancelled."))
+                page.snack_bar.open = True
+                page.update()
+            else:
+                # Web or no picker: save to default directory
+                out_path = _default_export_dir() / default_name
+                _write_and_confirm_export(out_path, payload, entry_ids)
             page.update()
 
         search_field = ft.TextField(
