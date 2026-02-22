@@ -349,13 +349,24 @@ class DatabaseManager:
             return matter
 
     def get_matters_with_full_paths(
-        self, for_timer: bool = False
+        self,
+        for_timer: bool = False,
+        *,
+        include_all_users: bool = False,
     ) -> list[tuple[int, str]]:
         """Return list of (matter_id, full_path) for dropdown.
-        When for_timer=True, only matters with a parent (non-root) are returned."""
+        When for_timer=True, only matters with a parent (non-root) are returned.
+        When include_all_users=True and current user is admin, returns all users' matters (for Timesheet admin view)."""
         self._require_user()
         with self._session() as session:
-            q = self._matter_query(session).order_by(Matter.matter_code)
+            if (
+                include_all_users
+                and self._is_admin(session)
+                and self._engine.dialect.name == "sqlite"
+            ):
+                q = session.query(Matter).order_by(Matter.matter_code)
+            else:
+                q = self._matter_query(session).order_by(Matter.matter_code)
             if for_timer:
                 q = q.filter(Matter.parent_id.isnot(None))
             matters = q.all()
@@ -479,17 +490,26 @@ class DatabaseManager:
                 .all()
             )
 
-    def get_descendant_matter_ids(self, matter_id: int) -> set[int]:
-        """Return the set of matter ids that are descendants of matter_id (children, grandchildren, etc.)."""
+    def get_descendant_matter_ids(
+        self, matter_id: int, *, include_all_users: bool = False
+    ) -> set[int]:
+        """Return the set of matter ids that are descendants of matter_id (children, grandchildren, etc.).
+        When include_all_users=True and current user is admin, includes descendants across all users (SQLite unscoped)."""
         self._require_user()
         with self._session() as session:
-            child_matters = self._matter_query(session).filter(
-                Matter.parent_id == matter_id
-            ).all()
+            if (
+                include_all_users
+                and self._is_admin(session)
+                and self._engine.dialect.name == "sqlite"
+            ):
+                base_q = session.query(Matter)
+            else:
+                base_q = self._matter_query(session)
+            child_matters = base_q.filter(Matter.parent_id == matter_id).all()
         child_ids = {m.id for m in child_matters}
         ids = set(child_ids)
         for cid in child_ids:
-            ids |= self.get_descendant_matter_ids(cid)
+            ids |= self.get_descendant_matter_ids(cid, include_all_users=include_all_users)
         return ids
 
     def get_time_entries_for_export(
@@ -507,8 +527,9 @@ class DatabaseManager:
         """
         self._require_user()
         with self._session() as session:
+            admin = self._is_admin(session)
             if export_all_users:
-                if not self._is_admin(session):
+                if not admin:
                     return []
                 # Admin export: all time entries (SQLite: unscoped; Postgres: RLS allows admin SELECT)
                 q = (
@@ -519,14 +540,23 @@ class DatabaseManager:
             else:
                 if not matter_ids:
                     return []
-                q = self._time_entry_query(session).filter(
-                    TimeEntry.matter_id.in_(matter_ids)
-                )
+                # Admin exporting selected matters: include entries from all users in those matters (SQLite unscoped)
+                if admin and self._engine.dialect.name == "sqlite":
+                    q = session.query(TimeEntry).filter(
+                        TimeEntry.matter_id.in_(matter_ids)
+                    )
+                else:
+                    q = self._time_entry_query(session).filter(
+                        TimeEntry.matter_id.in_(matter_ids)
+                    )
             if only_not_invoiced:
                 q = q.filter(TimeEntry.invoiced == False)
             entries = q.order_by(TimeEntry.start_time).all()
-            # Resolve matter path: for export_all_users use unscoped matter query (admin can see all)
-            if self._engine.dialect.name == "sqlite" and export_all_users:
+            # Resolve matter path: when admin on SQLite use unscoped matter query (see all users' matters)
+            if (
+                self._engine.dialect.name == "sqlite"
+                and (export_all_users or admin)
+            ):
                 matter_query = session.query(Matter)
             else:
                 matter_query = None  # use _matter_query per entry
@@ -547,7 +577,7 @@ class DatabaseManager:
                     "duration_seconds": e.duration_seconds or 0.0,
                     "invoiced": bool(e.invoiced),
                 }
-                if export_all_users:
+                if export_all_users or admin:
                     item["owner_id"] = e.owner_id
                 result.append(item)
             return result

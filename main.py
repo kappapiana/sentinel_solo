@@ -1776,7 +1776,9 @@ class SentinelApp:
             return by_client
 
         def _build_timesheet_list_controls(query: str):
-            path_list = self.db.get_matters_with_full_paths()
+            path_list = self.db.get_matters_with_full_paths(
+                include_all_users=current_user_is_admin
+            )
             q = (query or "").strip().lower()
             if q:
                 flat = [(mid, path) for mid, path in path_list if path and q in path.lower()][:30]
@@ -1845,7 +1847,9 @@ class SentinelApp:
             nonlocal timesheet_selected_ids
             if checked:
                 timesheet_selected_ids.add(matter_id)
-                timesheet_selected_ids |= self.db.get_descendant_matter_ids(matter_id)
+                timesheet_selected_ids |= self.db.get_descendant_matter_ids(
+                    matter_id, include_all_users=current_user_is_admin
+                )
             else:
                 timesheet_selected_ids.discard(matter_id)
             if timesheet_list_ref.current:
