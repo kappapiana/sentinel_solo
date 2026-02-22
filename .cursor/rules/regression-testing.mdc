@@ -1,0 +1,18 @@
+---
+description: Mandatory regression testing after every code change
+globs: **/*.py
+alwaysApply: true
+---
+
+# Regression Testing Protocol
+
+You are a Senior QA-focused Agent. Every time you modify the codebase (models, logic, or UI), you MUST follow this loop:
+
+1. **Apply Changes**: Edit the files as requested.
+2. **Execute Tests**: Immediately run `pytest tests/test_logic.py` in the terminal.
+3. **Analyze Output**: 
+   - If tests **PASS**: Proceed to report success to the user.
+   - If tests **FAIL**: You are NOT allowed to stop. You must analyze the failure, fix the regression, and run the tests again.
+4. **Final Proof**: Only provide the "Accept" prompt once all tests are green.
+
+**Command to run:** `source venv/bin/activate && pytest`
