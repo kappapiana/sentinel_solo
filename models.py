@@ -1,16 +1,31 @@
-from sqlalchemy import Boolean, Column, Integer, String, ForeignKey, DateTime, Float
+from sqlalchemy import Boolean, Column, Integer, String, ForeignKey, DateTime, Float, UniqueConstraint
 from sqlalchemy.orm import relationship, declarative_base
 from datetime import datetime
 
 Base = declarative_base()
 
-class Matter(Base):
-    __tablename__ = 'matters'
+
+class User(Base):
+    __tablename__ = "users"
     id = Column(Integer, primary_key=True)
-    matter_code = Column(String, unique=True, nullable=False)
+    username = Column(String, unique=True, nullable=False)
+    password_hash = Column(String, nullable=True)  # nullable for future OAuth
+    is_admin = Column(Boolean, default=False, nullable=False)
+
+    matters = relationship("Matter", back_populates="owner")
+    time_entries = relationship("TimeEntry", back_populates="owner")
+
+
+class Matter(Base):
+    __tablename__ = "matters"
+    __table_args__ = (UniqueConstraint("owner_id", "matter_code", name="uq_matter_owner_code"),)
+    id = Column(Integer, primary_key=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    matter_code = Column(String, nullable=False)
     name = Column(String, nullable=False)
-    parent_id = Column(Integer, ForeignKey('matters.id'), nullable=True)
-    
+    parent_id = Column(Integer, ForeignKey("matters.id"), nullable=True)
+
+    owner = relationship("User", back_populates="matters")
     sub_matters = relationship("Matter", backref="parent", remote_side=[id])
     time_entries = relationship("TimeEntry", back_populates="matter")
 
@@ -22,12 +37,14 @@ class Matter(Base):
         return f"{parent.get_full_path(session)} > {self.name}" if parent else self.name
 
 class TimeEntry(Base):
-    __tablename__ = 'time_entries'
+    __tablename__ = "time_entries"
     id = Column(Integer, primary_key=True)
-    matter_id = Column(Integer, ForeignKey('matters.id'), nullable=False)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    matter_id = Column(Integer, ForeignKey("matters.id"), nullable=False)
     description = Column(String)
     start_time = Column(DateTime, default=datetime.now)
     end_time = Column(DateTime, nullable=True)
     duration_seconds = Column(Float, default=0.0)
     invoiced = Column(Boolean, default=False, nullable=False)
+    owner = relationship("User", back_populates="time_entries")
     matter = relationship("Matter", back_populates="time_entries")

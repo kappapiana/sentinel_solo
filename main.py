@@ -1,5 +1,6 @@
 """
 Sentinel Solo: Flet UI with Timer and Manage Matters.
+Multi-user: login required; each user sees only their matters and time entries.
 """
 import asyncio
 import json
@@ -9,12 +10,17 @@ from pathlib import Path
 from typing import Callable
 
 import flet as ft
+import bcrypt
 
 from sqlalchemy.exc import IntegrityError
 
 from database_manager import DatabaseManager, db
 
 __version__ = "v.0.0.3"
+
+# Storage keys for persisted login (optional restore)
+STORAGE_USER_ID = "user_id"
+STORAGE_USERNAME = "username"
 
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 TIME_FMT = "%H:%M"
@@ -116,7 +122,13 @@ class SentinelApp:
         self.body_ref: ft.Ref[ft.Container] = ft.Ref()
         self.expanded_clients: set[str] = set()
 
-    def setup(self) -> None:
+    def setup(
+        self,
+        *,
+        logout_callback: Callable[[], None] | None = None,
+        current_username: str = "",
+        current_user_is_admin: bool = False,
+    ) -> None:
         page = self.page
         page.theme_mode = ft.ThemeMode.DARK
         page.title = f"Sentinel Solo {__version__}"
@@ -141,6 +153,11 @@ class SentinelApp:
 
         reporting_tab = self._build_reporting_tab(on_toggle_client)
         timesheet_tab = self._build_timesheet_tab()
+        users_container = (
+            ft.Container(content=self._build_users_tab(), expand=True)
+            if current_user_is_admin
+            else None
+        )
         timer_container = ft.Container(content=timer_tab, expand=True)
         matters_container = ft.Container(content=matters_tab, expand=True)
         reporting_container = ft.Container(content=reporting_tab, expand=True)
@@ -167,7 +184,15 @@ class SentinelApp:
 
         def show_timesheet(_):
             self.body_ref.current.content = timesheet_container
+            refresh = (page.data or {}).get("refresh_timesheet_matters")
+            if refresh:
+                refresh()
             page.update()
+
+        def show_users(_):
+            if users_container is not None:
+                self.body_ref.current.content = users_container
+                page.update()
 
         def on_rail_change(e):
             idx = e.control.selected_index
@@ -177,38 +202,67 @@ class SentinelApp:
                 show_matters(e)
             elif idx == 2:
                 show_reporting(e)
-            else:
+            elif idx == 3:
                 show_timesheet(e)
+            elif current_user_is_admin and idx == 4:
+                show_users(e)
 
+        destinations = [
+            ft.NavigationRailDestination(
+                icon=ft.Icons.TIMER,
+                selected_icon=ft.Icons.TIMER,
+                label="Timer",
+            ),
+            ft.NavigationRailDestination(
+                icon=ft.Icons.FOLDER_OPEN,
+                selected_icon=ft.Icons.FOLDER_OPEN,
+                label="Manage Matters",
+            ),
+            ft.NavigationRailDestination(
+                icon=ft.Icons.ASSESSMENT,
+                selected_icon=ft.Icons.ASSESSMENT,
+                label="Reporting",
+            ),
+            ft.NavigationRailDestination(
+                icon=ft.Icons.UPLOAD,
+                selected_icon=ft.Icons.UPLOAD,
+                label="Timesheet",
+            ),
+        ]
+        if current_user_is_admin:
+            destinations.append(
+                ft.NavigationRailDestination(
+                    icon=ft.Icons.PEOPLE,
+                    selected_icon=ft.Icons.PEOPLE,
+                    label="Users",
+                ),
+            )
+        if logout_callback:
+            destinations.append(
+                ft.NavigationRailDestination(
+                    icon=ft.Icons.LOGOUT,
+                    selected_icon=ft.Icons.LOGOUT,
+                    label="Log out",
+                ),
+            )
         rail = ft.NavigationRail(
             selected_index=0,
             extended=True,
             min_extended_width=180,
             label_type=ft.NavigationRailLabelType.ALL,
-            destinations=[
-                ft.NavigationRailDestination(
-                    icon=ft.Icons.TIMER,
-                    selected_icon=ft.Icons.TIMER,
-                    label="Timer",
-                ),
-                ft.NavigationRailDestination(
-                    icon=ft.Icons.FOLDER_OPEN,
-                    selected_icon=ft.Icons.FOLDER_OPEN,
-                    label="Manage Matters",
-                ),
-                ft.NavigationRailDestination(
-                    icon=ft.Icons.ASSESSMENT,
-                    selected_icon=ft.Icons.ASSESSMENT,
-                    label="Reporting",
-                ),
-                ft.NavigationRailDestination(
-                    icon=ft.Icons.UPLOAD,
-                    selected_icon=ft.Icons.UPLOAD,
-                    label="Timesheet",
-                ),
-            ],
+            destinations=destinations,
             on_change=on_rail_change,
         )
+
+        def _on_rail_change_with_logout(e):
+            if logout_callback and e.control.selected_index == len(destinations) - 1:
+                e.control.selected_index = 0
+                page.update()
+                logout_callback()
+                return
+            on_rail_change(e)
+
+        rail.on_change = _on_rail_change_with_logout
 
         body = ft.Container(ref=self.body_ref, content=timer_container, expand=True)
 
@@ -1704,7 +1758,6 @@ class SentinelApp:
     def _build_timesheet_tab(self) -> ft.Control:
         """Timesheet tab: matter selection (checkboxes, parent selects descendants), export to JSON, optional mark as invoiced."""
         page = self.page
-        path_list = self.db.get_matters_with_full_paths()
         timesheet_selected_ids: set[int] = set()
         timesheet_expanded: set[str] = set()
         timesheet_search_ref = ft.Ref[ft.TextField]()
@@ -1721,6 +1774,7 @@ class SentinelApp:
             return by_client
 
         def _build_timesheet_list_controls(query: str):
+            path_list = self.db.get_matters_with_full_paths()
             q = (query or "").strip().lower()
             if q:
                 flat = [(mid, path) for mid, path in path_list if path and q in path.lower()][:30]
@@ -1766,6 +1820,16 @@ class SentinelApp:
                     ),
                 )
             return controls
+
+        def refresh_timesheet_list():
+            if timesheet_list_ref.current:
+                search_val = timesheet_search_ref.current.value if timesheet_search_ref.current else ""
+                timesheet_list_ref.current.controls = _build_timesheet_list_controls(search_val)
+                page.update()
+
+        if page.data is None:
+            page.data = {}
+        page.data["refresh_timesheet_matters"] = refresh_timesheet_list
 
         def _on_toggle_timesheet_expanded(client_name: str):
             timesheet_expanded.symmetric_difference_update([client_name])
@@ -1886,11 +1950,460 @@ class SentinelApp:
             horizontal_alignment=ft.CrossAxisAlignment.START,
         )
 
+    def _build_users_tab(self) -> ft.Control:
+        """User administration (admin only): list users, add/edit/delete."""
+        page = self.page
+        db = self.db
+        current_uid = db.current_user_id
+        users_list_ref: ft.Ref[ft.Column] = ft.Ref()
 
-def main(page: ft.Page) -> None:
-    db.init_db()
-    app = SentinelApp(page, db)
-    app.setup()
+        def build_user_rows():
+            users = db.list_users()
+            rows: list[ft.Control] = []
+            for u in users:
+                admin_badge = ft.Chip(label="Admin", height=28) if u.is_admin else ft.Container(width=50, height=28)
+                is_self = u.id == current_uid
+                edit_btn = ft.OutlinedButton(
+                    "Edit",
+                    on_click=lambda e, uid=u.id: open_edit_dialog(uid),
+                )
+                if is_self:
+                    delete_btn = ft.Text("(you)", size=12)
+                else:
+                    delete_btn = ft.OutlinedButton(
+                        "Delete",
+                        on_click=lambda e, uid=u.id: open_delete_dialog(uid),
+                    )
+                rows.append(
+                    ft.Row(
+                        [
+                            ft.Text(u.username, size=14, width=180),
+                            admin_badge,
+                            edit_btn,
+                            delete_btn,
+                        ],
+                        spacing=12,
+                        alignment=ft.MainAxisAlignment.START,
+                    )
+                )
+            return rows
+
+        def refresh_list():
+            if users_list_ref.current:
+                users_list_ref.current.controls = build_user_rows()
+                page.update()
+
+        add_dialog_ref: list = []  # hold dialog so on_add_confirm can close it
+
+        def on_add_confirm(_):
+            if not add_dialog_ref:
+                return
+            add_dialog = add_dialog_ref[0]
+            content = add_dialog.content
+            username_tf = content.controls[0]
+            password_tf = content.controls[1]
+            admin_cb = content.controls[2]
+            username = (username_tf.value or "").strip()
+            password = (password_tf.value or "").strip()
+            if not username or not password:
+                return
+            if len(password) < 4:
+                return
+            try:
+                pw_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                db.create_user(username, pw_hash, is_admin=admin_cb.value)
+                username_tf.value = ""
+                password_tf.value = ""
+                admin_cb.value = False
+                close_dialog(add_dialog)
+                refresh_list()
+            except Exception as ex:
+                username_tf.error_text = str(ex)
+                page.update()
+
+        add_user_btn = ft.ElevatedButton("Add")
+        add_cancel_btn = ft.OutlinedButton("Cancel")
+        add_dialog = ft.AlertDialog(
+            title=ft.Text("Add user"),
+            content=ft.Column(
+                [
+                    ft.TextField(label="Username", width=300),
+                    ft.TextField(label="Password", password=True, can_reveal_password=True, width=300),
+                    ft.Checkbox(label="Admin", value=False),
+                    ft.Row(
+                        [add_user_btn, add_cancel_btn],
+                        spacing=12,
+                    ),
+                ],
+                tight=True,
+            ),
+        )
+        add_user_btn.on_click = on_add_confirm
+        add_cancel_btn.on_click = lambda _: close_dialog(add_dialog)
+        add_dialog_ref.append(add_dialog)
+
+        edit_dialog_user_id: list[int] = []
+        edit_dialog_ref: list = []
+
+        def on_edit_confirm(_):
+            if not edit_dialog_ref:
+                return
+            edit_dialog = edit_dialog_ref[0]
+            content = edit_dialog.content
+            if not edit_dialog_user_id:
+                return
+            uid = edit_dialog_user_id[0]
+            username_tf = content.controls[0]
+            password_tf = content.controls[1]
+            admin_cb = content.controls[2]
+            username = (username_tf.value or "").strip()
+            new_password = (password_tf.value or "").strip()
+            cur = db.get_user(current_uid)
+            can_set_admin = cur and cur.is_admin and uid != current_uid
+            try:
+                kwargs: dict = {"username": username}
+                if new_password:
+                    kwargs["password_hash"] = bcrypt.hashpw(
+                        new_password.encode("utf-8"), bcrypt.gensalt()
+                    ).decode("utf-8")
+                if can_set_admin:
+                    kwargs["is_admin"] = admin_cb.value
+                db.update_user(uid, **kwargs)
+                close_dialog(edit_dialog)
+                refresh_list()
+            except Exception as ex:
+                username_tf.error_text = str(ex)
+                page.update()
+
+        edit_save_btn = ft.ElevatedButton("Save")
+        edit_cancel_btn = ft.OutlinedButton("Cancel")
+        edit_dialog = ft.AlertDialog(
+            title=ft.Text("Edit user"),
+            content=ft.Column(
+                [
+                    ft.TextField(label="Username", width=300),
+                    ft.TextField(label="New password (leave blank to keep)", password=True, can_reveal_password=True, width=300),
+                    ft.Checkbox(label="Admin", value=False),
+                    ft.Row(
+                        [edit_save_btn, edit_cancel_btn],
+                        spacing=12,
+                    ),
+                ],
+                tight=True,
+            ),
+        )
+        edit_save_btn.on_click = on_edit_confirm
+        edit_cancel_btn.on_click = lambda _: close_dialog(edit_dialog)
+        edit_dialog_ref.append(edit_dialog)
+
+        def open_edit_dialog(uid: int):
+            user = db.get_user(uid)
+            if not user:
+                return
+            edit_dialog_user_id.clear()
+            edit_dialog_user_id.append(uid)
+            content = edit_dialog.content
+            content.controls[0].value = user.username
+            content.controls[1].value = ""
+            content.controls[2].value = user.is_admin
+            content.controls[2].visible = current_uid != uid and (db.get_user(current_uid) and db.get_user(current_uid).is_admin)
+            content.controls[0].error_text = None
+            edit_dialog.open = True
+            page.update()
+
+        delete_confirm_text_ref: ft.Ref[ft.Text] = ft.Ref()
+        delete_user_id_holder: list[int] = []
+        delete_confirm_dialog_ref: list = []
+
+        def on_delete_confirm(_):
+            if not delete_confirm_dialog_ref or not delete_user_id_holder or not delete_confirm_text_ref.current:
+                return
+            delete_confirm_dialog = delete_confirm_dialog_ref[0]
+            try:
+                uid = delete_user_id_holder[0]
+                db.delete_user(uid)
+                close_dialog(delete_confirm_dialog)
+                refresh_list()
+            except Exception as ex:
+                delete_confirm_text_ref.current.value = str(ex)
+                page.update()
+
+        delete_confirm_btn = ft.ElevatedButton("Delete")
+        delete_cancel_btn = ft.OutlinedButton("Cancel")
+        delete_confirm_dialog = ft.AlertDialog(
+            title=ft.Text("Delete user?"),
+            content=ft.Column(
+                [
+                    ft.Text("", ref=delete_confirm_text_ref, width=400),
+                    ft.Row(
+                        [delete_confirm_btn, delete_cancel_btn],
+                        spacing=12,
+                    ),
+                ],
+                tight=True,
+            ),
+        )
+        delete_confirm_btn.on_click = on_delete_confirm
+        delete_cancel_btn.on_click = lambda _: close_dialog(delete_confirm_dialog)
+        delete_confirm_dialog_ref.append(delete_confirm_dialog)
+
+        def open_delete_dialog(uid: int):
+            user = db.get_user(uid)
+            if not user:
+                return
+            delete_user_id_holder.clear()
+            delete_user_id_holder.append(uid)
+            if delete_confirm_text_ref.current:
+                delete_confirm_text_ref.current.value = f'Delete user "{user.username}"? This cannot be undone.'
+            delete_confirm_dialog.open = True
+            page.update()
+
+        def close_dialog(dlg: ft.AlertDialog):
+            dlg.open = False
+            page.update()
+
+        def open_add_dialog(_):
+            add_dialog.content.controls[0].value = ""
+            add_dialog.content.controls[1].value = ""
+            add_dialog.content.controls[2].value = False
+            add_dialog.content.controls[0].error_text = None
+            add_dialog.open = True
+            page.update()
+
+        page.overlay.append(add_dialog)
+        page.overlay.append(edit_dialog)
+        page.overlay.append(delete_confirm_dialog)
+
+        list_col = ft.Column(ref=users_list_ref, controls=build_user_rows(), scroll=ft.ScrollMode.AUTO)
+
+        return ft.Column(
+            [
+                ft.Text("User administration", size=24, weight=ft.FontWeight.BOLD),
+                ft.Container(height=16),
+                ft.ElevatedButton("Add user", icon=ft.Icons.ADD, on_click=open_add_dialog),
+                ft.Container(height=16),
+                ft.Text("Users", size=16, weight=ft.FontWeight.W_500),
+                ft.Container(height=8),
+                ft.Container(content=list_col, expand=True),
+            ],
+            expand=True,
+            horizontal_alignment=ft.CrossAxisAlignment.START,
+        )
+
+
+def _build_create_first_admin_view(
+    page: ft.Page,
+    login_db: DatabaseManager,
+    on_success: Callable[[int, str], None],
+) -> ft.Control:
+    """Build 'Create first admin' form when no users exist. On success call on_success(user_id, username)."""
+    username_field = ft.TextField(
+        label="Username (admin)",
+        autofocus=True,
+        text_align=ft.TextAlign.LEFT,
+        width=300,
+    )
+    password_field = ft.TextField(
+        label="Password",
+        password=True,
+        can_reveal_password=True,
+        text_align=ft.TextAlign.LEFT,
+        width=300,
+    )
+    error_text = ft.Text("", color=ft.Colors.RED, visible=False)
+    loading = ft.ProgressRing(visible=False)
+
+    def _do_create(_):
+        username = (username_field.value or "").strip()
+        password = (password_field.value or "").strip()
+        if not username or not password:
+            error_text.value = "Enter username and password."
+            error_text.visible = True
+            loading.visible = False
+            page.update()
+            return
+        if len(password) < 4:
+            error_text.value = "Password must be at least 4 characters."
+            error_text.visible = True
+            loading.visible = False
+            page.update()
+            return
+        error_text.visible = False
+        loading.visible = True
+        page.update()
+        try:
+            pw_hash = bcrypt.hashpw(
+                password.encode("utf-8"), bcrypt.gensalt()
+            ).decode("utf-8")
+            user_id = login_db.create_first_admin(username, pw_hash)
+        except Exception as e:
+            error_text.value = str(e) or "Failed to create admin."
+            error_text.visible = True
+            loading.visible = False
+            page.update()
+            return
+        if user_id is None:
+            error_text.value = "A user already exists. Use the login form."
+            error_text.visible = True
+            loading.visible = False
+            page.update()
+            return
+        loading.visible = False
+        page.update()
+        on_success(user_id, username)
+
+    password_field.on_submit = _do_create
+    create_btn = ft.ElevatedButton("Create admin", on_click=_do_create)
+    return ft.Column(
+        [
+            ft.Text("Sentinel Solo", size=28, weight=ft.FontWeight.BOLD),
+            ft.Container(height=8),
+            ft.Text("No users yet. Create the first admin account.", size=14),
+            ft.Container(height=24),
+            username_field,
+            ft.Container(height=12),
+            password_field,
+            ft.Container(height=12),
+            error_text,
+            ft.Container(height=12),
+            ft.Row([loading, create_btn], spacing=12),
+        ],
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        alignment=ft.MainAxisAlignment.CENTER,
+        expand=True,
+    )
+
+
+def _build_login_view(
+    page: ft.Page,
+    login_db: DatabaseManager,
+    on_success: Callable[[int, str], None],  # sync; can schedule async work via page.run_task
+) -> ft.Control:
+    """Build login form: username, password, Log in. On success call on_success(user_id, username)."""
+    username_field = ft.TextField(
+        label="Username",
+        autofocus=True,
+        text_align=ft.TextAlign.LEFT,
+        width=300,
+    )
+    password_field = ft.TextField(
+        label="Password",
+        password=True,
+        can_reveal_password=True,
+        text_align=ft.TextAlign.LEFT,
+        width=300,
+    )
+    error_text = ft.Text("", color=ft.Colors.RED, visible=False)
+    loading = ft.ProgressRing(visible=False)
+
+    def _do_login(_):
+        username = (username_field.value or "").strip()
+        password = (password_field.value or "").strip()
+        if not username or not password:
+            error_text.value = "Enter username and password."
+            error_text.visible = True
+            loading.visible = False
+            page.update()
+            return
+        error_text.visible = False
+        loading.visible = True
+        page.update()
+        try:
+            creds = login_db.get_login_credentials(username)
+            if creds and bcrypt.checkpw(
+                password.encode("utf-8"),
+                creds[1].encode("utf-8") if isinstance(creds[1], str) else creds[1],
+            ):
+                user_id = creds[0]
+            else:
+                user_id = None
+        except Exception:
+            user_id = None
+        if user_id is None:
+            error_text.value = "Invalid username or password."
+            error_text.visible = True
+            loading.visible = False
+            page.update()
+            return
+        loading.visible = False
+        page.update()
+        on_success(user_id, username)
+
+    password_field.on_submit = _do_login
+    login_btn = ft.ElevatedButton("Log in", on_click=_do_login)
+    return ft.Column(
+        [
+            ft.Text("Sentinel Solo", size=28, weight=ft.FontWeight.BOLD),
+            ft.Container(height=24),
+            username_field,
+            ft.Container(height=12),
+            password_field,
+            ft.Container(height=12),
+            error_text,
+            ft.Container(height=12),
+            ft.Row([loading, login_btn], spacing=12),
+        ],
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        alignment=ft.MainAxisAlignment.CENTER,
+        expand=True,
+    )
+
+
+async def main(page: ft.Page) -> None:
+    login_db = DatabaseManager()
+    login_db.init_db()
+
+    async def go_main(user_id: int, username: str) -> None:
+        await page.shared_preferences.set(STORAGE_USER_ID, str(user_id))
+        await page.shared_preferences.set(STORAGE_USERNAME, username)
+        page.controls.clear()
+        user_db = DatabaseManager(current_user_id=user_id)
+        current_user = user_db.get_user(user_id)
+        is_admin = current_user.is_admin if current_user else False
+        app = SentinelApp(page, user_db)
+        app.setup(
+            logout_callback=show_login,
+            current_username=username,
+            current_user_is_admin=is_admin,
+        )
+        page.update()
+
+    async def _go_main_task(uid: int, uname: str) -> None:
+        await go_main(uid, uname)
+
+    def on_login_success(uid: int, uname: str) -> None:
+        page.run_task(_go_main_task, uid, uname)
+
+    def show_login() -> None:
+        page.controls.clear()
+        if page.data is not None:
+            page.data.pop("app", None)
+        # If no users exist, show "Create first admin" instead of login
+        if not login_db.has_any_user():
+            view = _build_create_first_admin_view(
+                page,
+                login_db,
+                on_success=on_login_success,
+            )
+        else:
+            view = _build_login_view(
+                page,
+                login_db,
+                on_success=on_login_success,
+            )
+        page.add(ft.SafeArea(ft.Container(view, expand=True)))
+        page.update()
+
+    stored_id = await page.shared_preferences.get(STORAGE_USER_ID)
+    if stored_id is not None:
+        try:
+            uid = int(stored_id)
+            username = await page.shared_preferences.get(STORAGE_USERNAME) or ""
+            await go_main(uid, username)
+            return
+        except (ValueError, TypeError):
+            pass
+    show_login()
 
 
 if __name__ == "__main__":
