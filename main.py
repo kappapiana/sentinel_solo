@@ -1905,15 +1905,10 @@ class SentinelApp:
             exports_dir.mkdir(exist_ok=True)
             return exports_dir
 
-        # Flet 0.80+: FilePicker has no on_result; save_file() is async and returns the path
-        if page.data is None:
-            page.data = {}
-        if "timesheet_file_picker" not in page.data:
-            timesheet_file_picker = ft.FilePicker()
-            page.overlay.append(timesheet_file_picker)
-            page.data["timesheet_file_picker"] = timesheet_file_picker
+        # No FilePicker (causes "Unknown control" on some Flet clients). Use a folder path field instead.
+        export_dir_ref = ft.Ref[ft.TextField]()
 
-        async def _do_export(_):
+        def _do_export(_):
             if not timesheet_selected_ids:
                 page.snack_bar = ft.SnackBar(content=ft.Text("Select at least one matter"))
                 page.snack_bar.open = True
@@ -1941,32 +1936,32 @@ class SentinelApp:
             entry_ids = [e["id"] for e in entries]
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             default_name = f"timesheet_{timestamp}.json"
-            file_picker = page.data.get("timesheet_file_picker")
-            initial_dir = str(_default_export_dir()) if not page.web else None
-            path = None
-            if file_picker and not page.web:
-                path = await file_picker.save_file(
-                    dialog_title="Save timesheet",
-                    file_name=default_name,
-                    initial_directory=initial_dir,
-                )
-            if path:
-                _write_and_confirm_export(Path(path), payload, entry_ids)
-            elif file_picker and not page.web:
-                page.snack_bar = ft.SnackBar(content=ft.Text("Export cancelled."))
+            dir_str = (export_dir_ref.current.value or "").strip() if export_dir_ref.current else ""
+            export_dir = Path(dir_str).expanduser() if dir_str else _default_export_dir()
+            try:
+                export_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as err:
+                page.snack_bar = ft.SnackBar(content=ft.Text(f"Invalid save folder: {err}"))
                 page.snack_bar.open = True
                 page.update()
-            else:
-                # Web or no picker: save to default directory
-                out_path = _default_export_dir() / default_name
-                _write_and_confirm_export(out_path, payload, entry_ids)
+                return
+            out_path = export_dir / default_name
+            _write_and_confirm_export(out_path, payload, entry_ids)
             page.update()
 
+        default_dir_str = str(_default_export_dir())
         search_field = ft.TextField(
             label="Search matters by name or path",
             width=400,
             ref=timesheet_search_ref,
             on_change=_on_search_change,
+        )
+        export_dir_field = ft.TextField(
+            label="Save to folder",
+            value=default_dir_str,
+            width=500,
+            ref=export_dir_ref,
+            hint_text="e.g. /home/you/Downloads or leave default",
         )
         only_not_invoiced_cb = ft.Checkbox(
             label="Only include entries not yet marked as invoiced",
@@ -1983,6 +1978,8 @@ class SentinelApp:
                 ft.Text("Timesheet", size=24, weight=ft.FontWeight.BOLD),
                 ft.Container(height=16),
                 search_field,
+                ft.Container(height=8),
+                export_dir_field,
                 ft.Container(height=8),
                 only_not_invoiced_cb,
                 ft.Container(height=8),
