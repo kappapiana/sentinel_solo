@@ -1763,6 +1763,8 @@ class SentinelApp:
         timesheet_search_ref = ft.Ref[ft.TextField]()
         timesheet_list_ref = ft.Ref[ft.Column]()
         only_not_invoiced_ref = ft.Ref[ft.Checkbox]()
+        export_all_users_ref = ft.Ref[ft.Checkbox]()
+        current_user_is_admin = self.db.current_user_is_admin()
 
         def _options_by_client_timesheet(opts: list[tuple[int, str]]) -> dict:
             by_client = defaultdict(list)
@@ -1909,7 +1911,10 @@ class SentinelApp:
         export_dir_ref = ft.Ref[ft.TextField]()
 
         def _do_export(_):
-            if not timesheet_selected_ids:
+            export_all_users = (
+                export_all_users_ref.current.value if export_all_users_ref.current else False
+            )
+            if not export_all_users and not timesheet_selected_ids:
                 page.snack_bar = ft.SnackBar(content=ft.Text("Select at least one matter"))
                 page.snack_bar.open = True
                 page.update()
@@ -1918,11 +1923,17 @@ class SentinelApp:
                 only_not_invoiced_ref.current.value if only_not_invoiced_ref.current else True
             )
             entries = self.db.get_time_entries_for_export(
-                timesheet_selected_ids, only_not_invoiced=only_not_invoiced
+                timesheet_selected_ids,
+                only_not_invoiced=only_not_invoiced,
+                export_all_users=export_all_users,
             )
             if not entries:
                 page.snack_bar = ft.SnackBar(
-                    content=ft.Text("No matching time entries for the selected matters.")
+                    content=ft.Text(
+                        "No time entries to export."
+                        if export_all_users
+                        else "No matching time entries for the selected matters."
+                    )
                 )
                 page.snack_bar.open = True
                 page.update()
@@ -1968,6 +1979,12 @@ class SentinelApp:
             value=True,
             ref=only_not_invoiced_ref,
         )
+        export_all_users_cb = ft.Checkbox(
+            label="Export all users' time (admin only)",
+            value=False,
+            ref=export_all_users_ref,
+            visible=current_user_is_admin,
+        )
         list_column = ft.Column(
             ref=timesheet_list_ref,
             controls=_build_timesheet_list_controls(""),
@@ -1982,6 +1999,8 @@ class SentinelApp:
                 export_dir_field,
                 ft.Container(height=8),
                 only_not_invoiced_cb,
+                ft.Container(height=8),
+                export_all_users_cb,
                 ft.Container(height=8),
                 ft.ElevatedButton("Export timesheet", icon=ft.Icons.UPLOAD, on_click=_do_export),
                 ft.Container(height=16),

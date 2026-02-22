@@ -93,6 +93,20 @@ class DatabaseManager:
             q = q.filter(TimeEntry.owner_id == self._current_user_id)
         return q
 
+    def _is_admin(self, session: Session) -> bool:
+        """Return True if the current user is an admin."""
+        if self._current_user_id is None:
+            return False
+        user = session.query(User).filter(User.id == self._current_user_id).first()
+        return user is not None and bool(user.is_admin)
+
+    def current_user_is_admin(self) -> bool:
+        """Return True if the current user is an admin (for UI)."""
+        if self._current_user_id is None:
+            return False
+        with self._session() as session:
+            return self._is_admin(session)
+
     def init_db(self) -> None:
         """Create tables if they do not exist. For Postgres, enable RLS and create SECURITY DEFINER functions."""
         Base.metadata.create_all(self._engine)
@@ -173,7 +187,7 @@ class DatabaseManager:
             for table in ("matters", "time_entries", "users"):
                 conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
                 conn.execute(text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY"))
-            # matters: owner only
+            # matters: owner for write; owner or admin for read (admin can export all)
             conn.execute(
                 text(
                     """
@@ -187,10 +201,38 @@ class DatabaseManager:
             conn.execute(
                 text(
                     """
+                    DROP POLICY IF EXISTS matters_admin_select ON matters;
+                    CREATE POLICY matters_admin_select ON matters FOR SELECT
+                    USING (app.current_user_is_admin())
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
                     DROP POLICY IF EXISTS time_entries_owner ON time_entries;
                     CREATE POLICY time_entries_owner ON time_entries
                     FOR ALL USING (owner_id::text = current_setting('app.current_user_id', true))
                     WITH CHECK (owner_id::text = current_setting('app.current_user_id', true))
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    DROP POLICY IF EXISTS time_entries_admin_select ON time_entries;
+                    CREATE POLICY time_entries_admin_select ON time_entries FOR SELECT
+                    USING (app.current_user_is_admin())
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    DROP POLICY IF EXISTS time_entries_admin_update ON time_entries;
+                    CREATE POLICY time_entries_admin_update ON time_entries FOR UPDATE
+                    USING (app.current_user_is_admin())
+                    WITH CHECK (true)
                     """
                 )
             )
@@ -451,28 +493,51 @@ class DatabaseManager:
         return ids
 
     def get_time_entries_for_export(
-        self, matter_ids: set[int], only_not_invoiced: bool
+        self,
+        matter_ids: set[int],
+        only_not_invoiced: bool,
+        *,
+        export_all_users: bool = False,
     ) -> list[dict]:
         """
-        Return time entries whose matter_id is in matter_ids, optionally only not-invoiced.
-        Each item is a dict: id, matter_id, matter_path, description, start_time, end_time, duration_seconds, invoiced.
+        Return time entries for export. By default: entries whose matter_id is in matter_ids (owner-scoped).
+        If export_all_users is True and the current user is admin: all time entries (all users), ignoring matter_ids.
+        Each item is a dict: id, matter_id, matter_path, description, start_time, end_time, duration_seconds, invoiced[, owner_id].
         Times as ISO strings.
         """
         self._require_user()
-        if not matter_ids:
-            return []
         with self._session() as session:
-            q = self._time_entry_query(session).filter(
-                TimeEntry.matter_id.in_(matter_ids)
-            )
+            if export_all_users:
+                if not self._is_admin(session):
+                    return []
+                # Admin export: all time entries (SQLite: unscoped; Postgres: RLS allows admin SELECT)
+                q = (
+                    session.query(TimeEntry)
+                    if self._engine.dialect.name == "sqlite"
+                    else self._time_entry_query(session)
+                )
+            else:
+                if not matter_ids:
+                    return []
+                q = self._time_entry_query(session).filter(
+                    TimeEntry.matter_id.in_(matter_ids)
+                )
             if only_not_invoiced:
                 q = q.filter(TimeEntry.invoiced == False)
             entries = q.order_by(TimeEntry.start_time).all()
+            # Resolve matter path: for export_all_users use unscoped matter query (admin can see all)
+            if self._engine.dialect.name == "sqlite" and export_all_users:
+                matter_query = session.query(Matter)
+            else:
+                matter_query = None  # use _matter_query per entry
             result = []
             for e in entries:
-                matter = self._matter_query(session).filter(Matter.id == e.matter_id).first()
+                if matter_query is not None:
+                    matter = matter_query.filter(Matter.id == e.matter_id).first()
+                else:
+                    matter = self._matter_query(session).filter(Matter.id == e.matter_id).first()
                 path = matter.get_full_path(session) if matter else ""
-                result.append({
+                item = {
                     "id": e.id,
                     "matter_id": e.matter_id,
                     "matter_path": path,
@@ -481,18 +546,29 @@ class DatabaseManager:
                     "end_time": e.end_time.isoformat() if e.end_time else "",
                     "duration_seconds": e.duration_seconds or 0.0,
                     "invoiced": bool(e.invoiced),
-                })
+                }
+                if export_all_users:
+                    item["owner_id"] = e.owner_id
+                result.append(item)
             return result
 
     def mark_entries_invoiced(self, entry_ids: list[int]) -> None:
-        """Set invoiced=True for all TimeEntry rows with id in entry_ids."""
+        """Set invoiced=True for all TimeEntry rows with id in entry_ids. Admin can mark any user's entries."""
         self._require_user()
         if not entry_ids:
             return
         with self._session() as session:
-            self._time_entry_query(session).filter(
-                TimeEntry.id.in_(entry_ids)
-            ).update({TimeEntry.invoiced: True}, synchronize_session=False)
+            q = (
+                session.query(TimeEntry)
+                if (
+                    self._engine.dialect.name == "sqlite"
+                    and self._is_admin(session)
+                )
+                else self._time_entry_query(session)
+            )
+            q.filter(TimeEntry.id.in_(entry_ids)).update(
+                {TimeEntry.invoiced: True}, synchronize_session=False
+            )
             session.commit()
 
     def _resolve_time_trio(
