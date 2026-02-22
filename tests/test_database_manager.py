@@ -196,6 +196,56 @@ class TestOwnerFiltering:
         assert descendants_of_client == {project.id, sub.id}
         assert descendants_of_project == {sub.id}
 
+    def test_admin_sees_all_matters_with_include_all_users(self, db_user1: DatabaseManager, db_user2: DatabaseManager):
+        """Admin (user1) with include_all_users=True sees both users' matters; default remains owner-scoped."""
+        db_user1.add_matter("Admin Client", "admin-c", parent_id=None)
+        db_user2.add_matter("Other Client", "other-c", parent_id=None)
+        paths_default = db_user1.get_matters_with_full_paths()
+        paths_all = db_user1.get_matters_with_full_paths(include_all_users=True)
+        assert len(paths_default) == 1
+        assert any(p == "Admin Client" for _, p in paths_default)
+        assert len(paths_all) == 2
+        path_names = {p for _, p in paths_all}
+        assert path_names == {"Admin Client", "Other Client"}
+
+    def test_non_admin_include_all_users_still_owner_scoped(self, db_user1: DatabaseManager, db_user2: DatabaseManager):
+        """Non-admin (user2) with include_all_users=True still sees only their own matters."""
+        db_user1.add_matter("Admin Client", "admin-c", parent_id=None)
+        db_user2.add_matter("Other Client", "other-c", parent_id=None)
+        paths = db_user2.get_matters_with_full_paths(include_all_users=True)
+        assert len(paths) == 1
+        assert paths[0][1] == "Other Client"
+
+    def test_admin_export_all_users_includes_everyone_entries(self, db_user1: DatabaseManager, db_user2: DatabaseManager):
+        """Admin get_time_entries_for_export(export_all_users=True) returns entries from all users."""
+        c1 = db_user1.add_matter("C1", "c1", parent_id=None)
+        p1 = db_user1.add_matter("P1", "p1", parent_id=c1.id)
+        c2 = db_user2.add_matter("C2", "c2", parent_id=None)
+        p2 = db_user2.add_matter("P2", "p2", parent_id=c2.id)
+        db_user1.start_timer(p1.id, "Admin work")
+        db_user1.stop_timer()
+        db_user2.start_timer(p2.id, "User2 work")
+        db_user2.stop_timer()
+        entries = db_user1.get_time_entries_for_export(set(), only_not_invoiced=False, export_all_users=True)
+        assert len(entries) >= 2
+        owner_ids = {e["owner_id"] for e in entries}
+        assert db_user1.current_user_id in owner_ids
+        assert db_user2.current_user_id in owner_ids
+
+    def test_admin_export_selected_matters_includes_all_entries_in_matters(self, db_user1: DatabaseManager, db_user2: DatabaseManager):
+        """Admin exporting selected matter_ids gets all users' entries in those matters."""
+        c2 = db_user2.add_matter("User2 Client", "u2c", parent_id=None)
+        p2 = db_user2.add_matter("User2 Project", "u2p", parent_id=c2.id)
+        db_user2.start_timer(p2.id, "User2 entry")
+        db_user2.stop_timer()
+        # Admin selects user2's project and exports (admin sees it via include_all_users in UI)
+        entries = db_user1.get_time_entries_for_export(
+            {p2.id}, only_not_invoiced=False
+        )
+        assert len(entries) == 1
+        assert entries[0]["owner_id"] == db_user2.current_user_id
+        assert "User2" in entries[0]["matter_path"]
+
 
 # --- require_user ---
 
