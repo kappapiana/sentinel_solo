@@ -26,6 +26,20 @@ DATETIME_FMT = "%Y-%m-%d %H:%M"
 TIME_FMT = "%H:%M"
 
 
+# Rate source colors for chargeable amounts: user=red, upper_matter=orange, matter=green
+def _rate_source_color(source: str) -> str:
+    if source == "matter":
+        return "green"
+    if source == "upper_matter":
+        return "orange"
+    return "red"  # user
+
+
+def format_eur(amount: float) -> str:
+    """Format amount in EUR for display."""
+    return f"€ {amount:.2f}"
+
+
 def format_elapsed(seconds: float) -> str:
     """Format seconds as HH:MM:SS."""
     h = int(seconds) // 3600
@@ -455,6 +469,10 @@ class SentinelApp:
                 start_tf = ft.TextField(value=start_val, width=90, on_blur=lambda e, eid=entry_id: _on_activity_start_blur(eid, e.control.value))
                 end_tf = ft.TextField(value=end_val, width=90, on_blur=lambda e, eid=entry_id: _on_activity_end_blur(eid, e.control.value))
                 duration_tf = ft.TextField(value=duration_val, width=100, on_blur=lambda e, eid=entry_id: _on_activity_duration_blur(eid, e.control.value))
+                rate, rate_source = self.db.get_resolved_hourly_rate(entry.matter_id, entry.owner_id)
+                amount_eur = self.db.amount_eur_from_seconds(dur_sec, rate)
+                amount_color = _rate_source_color(rate_source)
+                amount_text = ft.Text(format_eur(amount_eur), size=12, color=amount_color, width=90)
 
                 def _on_activity_matter_change(eid: int, val: str | None):
                     if val is None:
@@ -540,7 +558,7 @@ class SentinelApp:
 
                 rows.append(
                     ft.Row(
-                        [matter_dd, desc_tf, start_tf, end_tf, duration_tf],
+                        [matter_dd, desc_tf, start_tf, end_tf, duration_tf, amount_text],
                         spacing=12,
                         alignment=ft.MainAxisAlignment.START,
                     )
@@ -555,6 +573,7 @@ class SentinelApp:
                     ft.Text("Start", size=12, weight=ft.FontWeight.W_500, width=90),
                     ft.Text("End", size=12, weight=ft.FontWeight.W_500, width=90),
                     ft.Text("Duration", size=12, weight=ft.FontWeight.W_500, width=100),
+                    ft.Text("Amount (€)", size=12, weight=ft.FontWeight.W_500, width=90),
                 ],
                 spacing=12,
             )
@@ -972,6 +991,10 @@ class SentinelApp:
                                         icon=ft.Icons.MORE_VERT,
                                         items=[
                                             ft.PopupMenuItem(
+                                                content="Edit rate…",
+                                                on_click=lambda e, m=mid, p=path: open_edit_matter_dialog(m, p),
+                                            ),
+                                            ft.PopupMenuItem(
                                                 content="Move…",
                                                 on_click=lambda e, m=mid, p=path: open_move_dialog(m, p),
                                             ),
@@ -1239,11 +1262,22 @@ class SentinelApp:
             for entry in entries:
                 desc = (entry.description or "")[:40] + ("…" if (entry.description or "") and len(entry.description or "") > 40 else "")
                 end_str = format_datetime(entry.end_time) if entry.end_time else "Running"
-                dur_str = format_elapsed(entry.duration_seconds) if entry.duration_seconds else ("—" if entry.end_time else "—")
+                dur_sec = entry.duration_seconds or 0.0
+                dur_str = format_elapsed(dur_sec) if dur_sec else ("—" if entry.end_time else "—")
+                rate, rate_source = self.db.get_resolved_hourly_rate(entry.matter_id, entry.owner_id)
+                amount_eur = self.db.amount_eur_from_seconds(dur_sec, rate)
+                amount_color = _rate_source_color(rate_source)
                 controls.append(
                     ft.ListTile(
                         title=ft.Text(desc or "(no description)", size=14),
-                        subtitle=ft.Text(f"{format_datetime(entry.start_time)} → {end_str}  ·  {dur_str}", size=12),
+                        subtitle=ft.Row(
+                            [
+                                ft.Text(f"{format_datetime(entry.start_time)} → {end_str}  ·  {dur_str}", size=12),
+                                ft.Text("  ", size=12),
+                                ft.Text(format_eur(amount_eur), size=12, color=amount_color),
+                            ],
+                            wrap=True,
+                        ),
                         trailing=ft.IconButton(icon=ft.Icons.EDIT, on_click=lambda e, ent=entry: open_edit_entry_dialog(ent)),
                     ),
                 )
@@ -1358,6 +1392,80 @@ class SentinelApp:
             if time_entries_dialog_ref.current:
                 time_entries_dialog_ref.current.open = False
             page.update()
+    
+        edit_matter_id_holder: list = []
+        edit_matter_rate_ref = ft.Ref[ft.TextField]()
+        edit_matter_dialog_ref = ft.Ref[ft.AlertDialog]()
+    
+        def open_edit_matter_dialog(mid: int, path: str):
+            matters = self.db.get_all_matters()
+            matter = next((m for m in matters if m.id == mid), None)
+            if not matter:
+                return
+            edit_matter_id_holder.clear()
+            edit_matter_id_holder.append(mid)
+            if edit_matter_rate_ref.current:
+                is_root = matter.parent_id is None
+                edit_matter_rate_ref.current.label = "Client hourly rate (€)" if is_root else "Matter hourly rate (€)"
+                rate_val = getattr(matter, "hourly_rate_euro", None)
+                edit_matter_rate_ref.current.value = str(rate_val) if rate_val is not None else ""
+                edit_matter_rate_ref.current.error_text = None
+            if edit_matter_dialog_ref.current:
+                edit_matter_dialog_ref.current.title = ft.Text(f"Edit: {path}")
+                edit_matter_dialog_ref.current.open = True
+            page.update()
+    
+        def on_edit_matter_save(_):
+            if not edit_matter_id_holder or not edit_matter_rate_ref.current:
+                return
+            mid = edit_matter_id_holder[0]
+            rate_str = (edit_matter_rate_ref.current.value or "").strip()
+            rate_val = None
+            if rate_str:
+                try:
+                    rate_val = float(rate_str)
+                    if rate_val < 0:
+                        edit_matter_rate_ref.current.error_text = "Rate must be ≥ 0."
+                        page.update()
+                        return
+                except ValueError:
+                    edit_matter_rate_ref.current.error_text = "Enter a number or leave empty to clear."
+                    page.update()
+                    return
+            try:
+                self.db.update_matter(mid, hourly_rate_euro=rate_val)
+                if edit_matter_dialog_ref.current:
+                    edit_matter_dialog_ref.current.open = False
+                refresh_list()
+                if on_matters_changed:
+                    on_matters_changed()
+                page.snack_bar = ft.SnackBar(ft.Text("Hourly rate updated."), open=True)
+            except ValueError as err:
+                edit_matter_rate_ref.current.error_text = str(err)
+            page.update()
+    
+        def on_edit_matter_cancel(_):
+            if edit_matter_dialog_ref.current:
+                edit_matter_dialog_ref.current.open = False
+            page.update()
+    
+        edit_matter_dialog = ft.AlertDialog(
+            ref=edit_matter_dialog_ref,
+            title=ft.Text("Edit matter"),
+            content=ft.Column(
+                [
+                    ft.TextField(ref=edit_matter_rate_ref, label="Hourly rate (€)", width=300, hint_text="Leave empty to clear"),
+                    ft.Row(
+                        [
+                            ft.ElevatedButton("Save", on_click=on_edit_matter_save),
+                            ft.OutlinedButton("Cancel", on_click=on_edit_matter_cancel),
+                        ],
+                        spacing=12,
+                    ),
+                ],
+                tight=True,
+            ),
+        )
     
         def refresh_list():
             by_client = _by_client()
@@ -1622,6 +1730,7 @@ class SentinelApp:
         )
         page.overlay.append(move_dialog)
         page.overlay.append(merge_dialog)
+        page.overlay.append(edit_matter_dialog)
         page.overlay.append(time_entries_dialog)
         page.overlay.append(edit_entry_dialog)
         page.overlay.append(add_entry_dialog)
@@ -1655,9 +1764,9 @@ class SentinelApp:
     def _build_reporting_tab(
         self,
         on_toggle_client: Callable[[str], None],
-        rows_data: list[tuple[str, str, float, float]] | None = None,
+        rows_data: list[tuple[str, str, float, float, float, float, str]] | None = None,
     ) -> ft.Control:
-        """Build the Reporting tab: clients (collapsed by default), expand to show matters; total vs not invoiced; sort by option."""
+        """Build the Reporting tab: clients (collapsed by default), expand to show matters; total vs not invoiced; chargeable € with color."""
         page = self.page
         expanded_clients = self.expanded_clients
         if rows_data is None:
@@ -1679,9 +1788,10 @@ class SentinelApp:
                 horizontal_alignment=ft.CrossAxisAlignment.START,
             )
 
-        by_client: dict[str, list[tuple[str, float, float]]] = defaultdict(list)
-        for client_name, matter_path, total_seconds, not_invoiced_seconds in rows_data:
-            by_client[client_name].append((matter_path, total_seconds, not_invoiced_seconds))
+        by_client: dict[str, list[tuple[str, float, float, float, float, str]]] = defaultdict(list)
+        for row in rows_data:
+            client_name, matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_inv_amount_eur, rate_source = row
+            by_client[client_name].append((matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_inv_amount_eur, rate_source))
 
         def on_sort_change(e):
             val = getattr(e.control, "value", None) or getattr(e, "data", None)
@@ -1705,8 +1815,8 @@ class SentinelApp:
         client_order = sorted(
             by_client.keys(),
             key=lambda c: (
-                sum(ni for _, _, ni in by_client[c]) if sort_value == "most_uninvoiced"
-                else sum(t for _, t, _ in by_client[c])
+                sum(r[2] for r in by_client[c]) if sort_value == "most_uninvoiced"  # not_invoiced_seconds
+                else sum(r[1] for r in by_client[c])  # total_seconds
             ),
             reverse=True,
         )
@@ -1719,21 +1829,18 @@ class SentinelApp:
                 search_results_ref.current.controls = []
                 search_results_ref.current.visible = False
             else:
-                matching = [
-                    r for r in rows_data
-                    if q in r[0].lower() or q in r[1].lower()
-                ][:6]
+                _match_list = [r for r in rows_data if q in r[0].lower() or q in r[1].lower()][:6]
                 search_results_ref.current.controls = [
                     ft.ListTile(
                         title=ft.Text(matter_path, size=14),
                         subtitle=ft.Text(
-                            f"{client_name} · Total {format_elapsed(sec)} · Not invoiced {format_elapsed(ni)}",
+                            f"{client_name} · Total {format_elapsed(sec)} · Not inv. {format_elapsed(ni)} · {format_eur(ta)} (not inv. {format_eur(na)})",
                             size=12,
                         ),
                     )
-                    for client_name, matter_path, sec, ni in matching
+                    for (client_name, matter_path, sec, ni, ta, na, _) in _match_list
                 ]
-                search_results_ref.current.visible = bool(matching)
+                search_results_ref.current.visible = bool(_match_list)
             page.update()
 
         search_field = ft.TextField(
@@ -1751,8 +1858,10 @@ class SentinelApp:
         client_blocks = []
         for client_name in client_order:
             matter_rows = by_client[client_name]
-            client_total = sum(t for _, t, _ in matter_rows)
-            client_not_invoiced = sum(ni for _, _, ni in matter_rows)
+            client_total = sum(r[1] for r in matter_rows)
+            client_not_invoiced = sum(r[2] for r in matter_rows)
+            client_total_eur = sum(r[3] for r in matter_rows)
+            client_not_inv_eur = sum(r[4] for r in matter_rows)
             is_expanded = client_name in expanded_clients
             client_blocks.append(
                 ft.Column(
@@ -1760,7 +1869,7 @@ class SentinelApp:
                         ft.ListTile(
                             title=ft.Text(client_name, weight=ft.FontWeight.W_500),
                             subtitle=ft.Text(
-                                f"Total {format_elapsed(client_total)} · Not invoiced {format_elapsed(client_not_invoiced)}",
+                                f"Total {format_elapsed(client_total)} · Not inv. {format_elapsed(client_not_invoiced)} · Chargeable {format_eur(client_total_eur)} (not inv. {format_eur(client_not_inv_eur)})",
                                 size=12,
                             ),
                             trailing=ft.Icon(
@@ -1773,12 +1882,22 @@ class SentinelApp:
                                 [
                                     ft.ListTile(
                                         title=ft.Text(matter_path, size=14),
-                                        subtitle=ft.Text(
-                                            f"Total {format_elapsed(total_seconds)} · Not invoiced {format_elapsed(not_invoiced_seconds)}",
-                                            size=12,
+                                        subtitle=ft.Row(
+                                            [
+                                                ft.Text(
+                                                    f"Total {format_elapsed(total_seconds)} · Not inv. {format_elapsed(not_invoiced_seconds)} · ",
+                                                    size=12,
+                                                ),
+                                                ft.Text("Chargeable ", size=12),
+                                                ft.Text(format_eur(total_amount_eur), size=12, color=_rate_source_color(rate_source)),
+                                                ft.Text(f" (not inv. ", size=12),
+                                                ft.Text(format_eur(not_inv_amount_eur), size=12, color=_rate_source_color(rate_source)),
+                                                ft.Text(")", size=12),
+                                            ],
+                                            wrap=True,
                                         ),
                                     )
-                                    for matter_path, total_seconds, not_invoiced_seconds in sorted(
+                                    for (matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_inv_amount_eur, rate_source) in sorted(
                                         matter_rows, key=lambda r: r[0]
                                     )
                                 ],
@@ -1818,9 +1937,61 @@ class SentinelApp:
         timesheet_expanded: set[str] = set()
         timesheet_search_ref = ft.Ref[ft.TextField]()
         timesheet_list_ref = ft.Ref[ft.Column]()
+        timesheet_preview_ref = ft.Ref[ft.Column]()
         only_not_invoiced_ref = ft.Ref[ft.Checkbox]()
         export_all_users_ref = ft.Ref[ft.Checkbox]()
         current_user_is_admin = self.db.current_user_is_admin()
+
+        def _do_preview(_):
+            export_all_users = (
+                export_all_users_ref.current.value if export_all_users_ref.current else False
+            )
+            if not export_all_users and not timesheet_selected_ids:
+                page.snack_bar = ft.SnackBar(content=ft.Text("Select at least one matter"))
+                page.snack_bar.open = True
+                page.update()
+                return
+            only_not_invoiced = (
+                only_not_invoiced_ref.current.value if only_not_invoiced_ref.current else True
+            )
+            entries = self.db.get_time_entries_for_export(
+                timesheet_selected_ids,
+                only_not_invoiced=only_not_invoiced,
+                export_all_users=export_all_users,
+            )
+            if not entries:
+                preview_controls = [ft.Text("No entries to show.", size=14)]
+            else:
+                preview_controls = [
+                    ft.Row(
+                        [
+                            ft.Text("Matter", size=12, weight=ft.FontWeight.W_500, width=280),
+                            ft.Text("Description", size=12, weight=ft.FontWeight.W_500, width=180),
+                            ft.Text("Duration", size=12, weight=ft.FontWeight.W_500, width=80),
+                            ft.Text("Amount (€)", size=12, weight=ft.FontWeight.W_500, width=90),
+                        ],
+                        spacing=8,
+                    ),
+                ]
+                for e in entries:
+                    dur = e.get("duration_seconds", 0) or 0
+                    amount_eur = e.get("amount_eur", 0.0)
+                    rate_source = e.get("rate_source", "user")
+                    color = _rate_source_color(rate_source)
+                    preview_controls.append(
+                        ft.Row(
+                            [
+                                ft.Text((e.get("matter_path") or "")[:40], size=12, width=280, overflow=ft.TextOverflow.ELLIPSIS),
+                                ft.Text((e.get("description") or "")[:30], size=12, width=180, overflow=ft.TextOverflow.ELLIPSIS),
+                                ft.Text(format_elapsed_hm(dur), size=12, width=80),
+                                ft.Text(format_eur(amount_eur), size=12, color=color, width=90),
+                            ],
+                            spacing=8,
+                        )
+                    )
+            if timesheet_preview_ref.current:
+                timesheet_preview_ref.current.controls = preview_controls
+            page.update()
 
         def _options_by_client_timesheet(opts: list[tuple[int, str]]) -> dict:
             by_client = defaultdict(list)
@@ -2062,7 +2233,20 @@ class SentinelApp:
                 ft.Container(height=8),
                 export_all_users_cb,
                 ft.Container(height=8),
-                ft.ElevatedButton("Export timesheet", icon=ft.Icons.UPLOAD, on_click=_do_export),
+                ft.Row(
+                    [
+                        ft.ElevatedButton("Preview", icon=ft.Icons.LIST, on_click=_do_preview),
+                        ft.ElevatedButton("Export timesheet", icon=ft.Icons.UPLOAD, on_click=_do_export),
+                    ],
+                    spacing=12,
+                ),
+                ft.Container(height=16),
+                ft.Text("Preview (amounts by rate source: green=matter, orange=upper, red=user)", size=12),
+                ft.Container(height=6),
+                ft.Container(
+                    content=ft.Column(ref=timesheet_preview_ref, scroll=ft.ScrollMode.AUTO),
+                    height=180,
+                ),
                 ft.Container(height=16),
                 ft.Text("Matters", size=16, weight=ft.FontWeight.W_500),
                 ft.Container(height=8),
@@ -2178,8 +2362,22 @@ class SentinelApp:
             username_tf = content.controls[0]
             password_tf = content.controls[1]
             admin_cb = content.controls[2]
+            rate_tf = content.controls[3]
             username = (username_tf.value or "").strip()
             new_password = (password_tf.value or "").strip()
+            rate_str = (rate_tf.value or "").strip()
+            default_rate: float | None = None
+            if rate_str:
+                try:
+                    default_rate = float(rate_str)
+                    if default_rate < 0:
+                        username_tf.error_text = "Default hourly rate must be ≥ 0."
+                        page.update()
+                        return
+                except ValueError:
+                    username_tf.error_text = "Default hourly rate must be a number."
+                    page.update()
+                    return
             cur = db.get_user(current_uid)
             can_set_admin = cur and cur.is_admin and uid != current_uid
             try:
@@ -2190,6 +2388,7 @@ class SentinelApp:
                     ).decode("utf-8")
                 if can_set_admin:
                     kwargs["is_admin"] = admin_cb.value
+                kwargs["default_hourly_rate_euro"] = default_rate
                 db.update_user(uid, **kwargs)
                 close_dialog(edit_dialog)
                 refresh_list()
@@ -2206,6 +2405,7 @@ class SentinelApp:
                     ft.TextField(label="Username", width=300),
                     ft.TextField(label="New password (leave blank to keep)", password=True, can_reveal_password=True, width=300),
                     ft.Checkbox(label="Admin", value=False),
+                    ft.TextField(label="Default hourly rate (€)", width=300, hint_text="Leave empty to clear"),
                     ft.Row(
                         [edit_save_btn, edit_cancel_btn],
                         spacing=12,
@@ -2229,6 +2429,8 @@ class SentinelApp:
             content.controls[1].value = ""
             content.controls[2].value = user.is_admin
             content.controls[2].visible = current_uid != uid and (db.get_user(current_uid) and db.get_user(current_uid).is_admin)
+            rate_val = getattr(user, "default_hourly_rate_euro", None)
+            content.controls[3].value = str(rate_val) if rate_val is not None else ""
             content.controls[0].error_text = None
             edit_dialog.open = True
             page.update()

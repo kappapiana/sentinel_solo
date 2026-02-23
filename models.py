@@ -11,6 +11,7 @@ class User(Base):
     username = Column(String, unique=True, nullable=False)
     password_hash = Column(String, nullable=True)  # nullable for future OAuth
     is_admin = Column(Boolean, default=False, nullable=False)
+    default_hourly_rate_euro = Column(Float, nullable=True)
 
     matters = relationship("Matter", back_populates="owner")
     time_entries = relationship("TimeEntry", back_populates="owner")
@@ -24,6 +25,7 @@ class Matter(Base):
     matter_code = Column(String, nullable=False)
     name = Column(String, nullable=False)
     parent_id = Column(Integer, ForeignKey("matters.id"), nullable=True)
+    hourly_rate_euro = Column(Float, nullable=True)
 
     owner = relationship("User", back_populates="matters")
     sub_matters = relationship("Matter", backref="parent", remote_side=[id])

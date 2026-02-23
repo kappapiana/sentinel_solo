@@ -8,7 +8,9 @@ import re
 from pathlib import Path
 from datetime import datetime, date, timedelta
 from contextlib import contextmanager
-from typing import Generator
+from typing import Generator, Literal
+
+_UNSET = object()
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
@@ -119,6 +121,16 @@ class DatabaseManager:
                     conn.execute(
                         text(f"ALTER TABLE time_entries ADD COLUMN invoiced BOOLEAN NOT NULL DEFAULT {default}")
                     )
+                    conn.commit()
+            if "users" in insp.get_table_names():
+                user_cols = [c["name"] for c in insp.get_columns("users")]
+                if "default_hourly_rate_euro" not in user_cols:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN default_hourly_rate_euro REAL"))
+                    conn.commit()
+            if "matters" in insp.get_table_names():
+                matter_cols = [c["name"] for c in insp.get_columns("matters")]
+                if "hourly_rate_euro" not in matter_cols:
+                    conn.execute(text("ALTER TABLE matters ADD COLUMN hourly_rate_euro REAL"))
                     conn.commit()
         if self._engine.dialect.name == "postgresql":
             self._init_postgres_rls()
@@ -384,6 +396,31 @@ class DatabaseManager:
             session.refresh(matter)
             return matter
 
+    def update_matter(
+        self,
+        matter_id: int,
+        *,
+        name: str | None = None,
+        matter_code: str | None = None,
+        parent_id: int | None = None,
+        hourly_rate_euro: float | None = _UNSET,
+    ) -> None:
+        """Update matter (owner only; optional fields). Pass None for hourly_rate_euro to clear."""
+        self._require_user()
+        with self._session() as session:
+            matter = self._matter_query(session).filter(Matter.id == matter_id).first()
+            if matter is None:
+                raise ValueError("Matter not found.")
+            if name is not None:
+                matter.name = name
+            if matter_code is not None:
+                matter.matter_code = matter_code
+            if parent_id is not None:
+                matter.parent_id = parent_id
+            if hourly_rate_euro is not _UNSET:
+                matter.hourly_rate_euro = hourly_rate_euro
+            session.commit()
+
     def get_matters_with_full_paths(
         self,
         for_timer: bool = False,
@@ -595,14 +632,16 @@ class DatabaseManager:
             ):
                 matter_query = session.query(Matter)
             else:
-                matter_query = None  # use _matter_query per entry
+                matter_query = self._matter_query(session)
             result = []
             for e in entries:
-                if matter_query is not None:
-                    matter = matter_query.filter(Matter.id == e.matter_id).first()
-                else:
-                    matter = self._matter_query(session).filter(Matter.id == e.matter_id).first()
+                matter = matter_query.filter(Matter.id == e.matter_id).first()
                 path = matter.get_full_path(session) if matter else ""
+                rate, rate_source = self._resolve_hourly_rate_in_session(
+                    session, matter, e.owner_id, matter_query
+                )
+                dur = e.duration_seconds or 0.0
+                amount_eur = self.amount_eur_from_seconds(dur, rate)
                 item = {
                     "id": e.id,
                     "matter_id": e.matter_id,
@@ -610,8 +649,10 @@ class DatabaseManager:
                     "description": e.description or "",
                     "start_time": e.start_time.isoformat() if e.start_time else "",
                     "end_time": e.end_time.isoformat() if e.end_time else "",
-                    "duration_seconds": e.duration_seconds or 0.0,
+                    "duration_seconds": dur,
                     "invoiced": bool(e.invoiced),
+                    "amount_eur": amount_eur,
+                    "rate_source": rate_source,
                 }
                 if export_all_users or admin:
                     item["owner_id"] = e.owner_id
@@ -666,6 +707,7 @@ class DatabaseManager:
                     "username": u.username,
                     "password_hash": u.password_hash,
                     "is_admin": bool(u.is_admin),
+                    "default_hourly_rate_euro": getattr(u, "default_hourly_rate_euro", None),
                 }
                 for u in users
             ],
@@ -676,6 +718,7 @@ class DatabaseManager:
                     "matter_code": m.matter_code,
                     "name": m.name,
                     "parent_id": m.parent_id,
+                    "hourly_rate_euro": getattr(m, "hourly_rate_euro", None),
                 }
                 for m in matters
             ],
@@ -723,6 +766,7 @@ class DatabaseManager:
                         username=row["username"],
                         password_hash=row.get("password_hash"),
                         is_admin=bool(row.get("is_admin", False)),
+                        default_hourly_rate_euro=row.get("default_hourly_rate_euro"),
                     )
                 )
             session.flush()
@@ -734,6 +778,7 @@ class DatabaseManager:
                         matter_code=row["matter_code"],
                         name=row["name"],
                         parent_id=row.get("parent_id"),
+                        hourly_rate_euro=row.get("hourly_rate_euro"),
                     )
                 )
             session.flush()
@@ -896,6 +941,61 @@ class DatabaseManager:
                 return matter.name
         return current.name
 
+    def get_resolved_hourly_rate(
+        self, matter_id: int, owner_id: int | None = None
+    ) -> tuple[float, Literal["matter", "upper_matter", "user"]]:
+        """
+        Resolve hourly rate (EUR) for a matter: matter > ancestor (client/parent) > user default.
+        owner_id is used for user fallback; if None, use current_user_id.
+        Returns (rate, source) where source is "matter" | "upper_matter" | "user".
+        """
+        self._require_user()
+        with self._session() as session:
+            oid = owner_id if owner_id is not None else self._current_user_id
+            mq = self._matter_query(session)
+            matter = mq.filter(Matter.id == matter_id).first()
+            return self._resolve_hourly_rate_in_session(session, matter, oid, mq)
+
+    @staticmethod
+    def amount_eur_from_seconds(duration_seconds: float, rate: float) -> float:
+        """Compute chargeable amount in EUR from duration (seconds) and hourly rate."""
+        return round((duration_seconds / 3600.0) * rate, 2)
+
+    def _resolve_hourly_rate_in_session(
+        self,
+        session: Session,
+        matter: Matter | None,
+        owner_id: int,
+        matter_query,
+    ) -> tuple[float, Literal["matter", "upper_matter", "user"]]:
+        """Resolve rate from matter (walk up to root), then user default. matter_query used to fetch parents."""
+        if matter is None:
+            user = session.query(User).filter(User.id == owner_id).first()
+            default = (
+                getattr(user, "default_hourly_rate_euro", None) if user else None
+            )
+            return (float(default) if default is not None else 0.0, "user")
+        rate = getattr(matter, "hourly_rate_euro", None)
+        if rate is not None:
+            return (float(rate), "matter")
+        current = matter
+        while current.parent_id is not None:
+            parent = matter_query.filter(Matter.id == current.parent_id).first()
+            if parent is None:
+                break
+            current = parent
+            rate = getattr(current, "hourly_rate_euro", None)
+            if rate is not None:
+                return (float(rate), "upper_matter")
+        rate = getattr(current, "hourly_rate_euro", None)
+        if rate is not None:
+            return (float(rate), "upper_matter")
+        user = session.query(User).filter(User.id == owner_id).first()
+        default = (
+            getattr(user, "default_hourly_rate_euro", None) if user else None
+        )
+        return (float(default) if default is not None else 0.0, "user")
+
     def _is_descendant_of(
         self, session: Session, matter_id: int, ancestor_id: int
     ) -> bool:
@@ -1025,8 +1125,8 @@ class DatabaseManager:
         self,
         date_from: date | None = None,
         date_to: date | None = None,
-    ) -> list[tuple[str, str, float, float]]:
-        """Like get_time_by_client_and_matter but returns (client, matter_path, total_seconds, not_invoiced_seconds)."""
+    ) -> list[tuple[str, str, float, float, float, float, Literal["matter", "upper_matter", "user"]]]:
+        """Returns (client, matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_invoiced_amount_eur, rate_source)."""
         self._require_user()
         with self._session() as session:
             q = self._time_entry_query(session).filter(
@@ -1041,23 +1141,42 @@ class DatabaseManager:
             entries = q.all()
             agg_total: dict[tuple[str, str], float] = {}
             agg_not_invoiced: dict[tuple[str, str], float] = {}
+            matter_id_by_key: dict[tuple[str, str], int] = {}
+            mq = self._matter_query(session)
             for entry in entries:
-                matter = self._matter_query(session).filter(
-                    Matter.id == entry.matter_id
-                ).first()
+                matter = mq.filter(Matter.id == entry.matter_id).first()
                 if matter is None:
                     continue
                 client_name = self._get_root_matter_name(session, matter)
                 full_path = matter.get_full_path(session)
                 key = (client_name, full_path)
+                matter_id_by_key[key] = matter.id
                 sec = entry.duration_seconds or 0.0
                 agg_total[key] = agg_total.get(key, 0.0) + sec
                 if not entry.invoiced:
                     agg_not_invoiced[key] = agg_not_invoiced.get(key, 0.0) + sec
-            result = [
-                (client, path, agg_total.get((client, path), 0.0), agg_not_invoiced.get((client, path), 0.0))
-                for (client, path) in agg_total
-            ]
+            result = []
+            for (client, path) in agg_total:
+                total_sec = agg_total.get((client, path), 0.0)
+                not_inv_sec = agg_not_invoiced.get((client, path), 0.0)
+                mid = matter_id_by_key.get((client, path))
+                matter = mq.filter(Matter.id == mid).first() if mid else None
+                rate, rate_source = self._resolve_hourly_rate_in_session(
+                    session, matter, self._current_user_id, mq
+                )
+                total_amount_eur = self.amount_eur_from_seconds(total_sec, rate)
+                not_inv_amount_eur = self.amount_eur_from_seconds(not_inv_sec, rate)
+                result.append(
+                    (
+                        client,
+                        path,
+                        total_sec,
+                        not_inv_sec,
+                        total_amount_eur,
+                        not_inv_amount_eur,
+                        rate_source,
+                    )
+                )
             result.sort(key=lambda r: (r[0], r[1]))
             return result
 
@@ -1130,8 +1249,9 @@ class DatabaseManager:
         username: str | None = None,
         password_hash: str | None = None,
         is_admin: bool | None = None,
+        default_hourly_rate_euro: float | None = _UNSET,
     ) -> None:
-        """Update user (own row for non-admin; any row for admin)."""
+        """Update user (own row for non-admin; any row for admin). Pass None for default_hourly_rate_euro to clear."""
         self._require_user()
         with self._session() as session:
             user = session.query(User).filter(User.id == user_id).first()
@@ -1155,6 +1275,8 @@ class DatabaseManager:
                 user.password_hash = password_hash
             if is_admin is not None:
                 user.is_admin = is_admin
+            if default_hourly_rate_euro is not _UNSET:
+                user.default_hourly_rate_euro = default_hourly_rate_euro
             session.commit()
 
     def delete_user(self, user_id: int) -> None:

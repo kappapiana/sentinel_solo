@@ -256,17 +256,19 @@ class TestReportingAggregation:
     def test_get_time_by_client_and_matter_detailed_returns_total_and_not_invoiced(
         self, db_user1: DatabaseManager
     ):
-        """Detailed returns (client, matter_path, total_seconds, not_invoiced_seconds)."""
+        """Detailed returns (client, matter_path, total_seconds, not_invoiced_seconds, total_eur, not_inv_eur, rate_source)."""
         client = db_user1.add_matter("C", "c", parent_id=None)
         project = db_user1.add_matter("P", "p", parent_id=client.id)
         db_user1.start_timer(project.id, "Work")
         db_user1.stop_timer()
         rows = db_user1.get_time_by_client_and_matter_detailed()
         assert len(rows) >= 1
-        for client_name, matter_path, total, not_invoiced in rows:
+        for row in rows:
+            client_name, matter_path, total, not_invoiced, total_eur, not_inv_eur, rate_source = row
             assert total >= 0
             assert not_invoiced >= 0
             assert not_invoiced <= total
+            assert rate_source in ("matter", "upper_matter", "user")
 
     def test_get_time_by_client_and_matter_detailed_invoiced_excluded_from_not_invoiced(
         self, db_user1: DatabaseManager
@@ -280,7 +282,7 @@ class TestReportingAggregation:
         db_user1.stop_timer()
         rows_before = db_user1.get_time_by_client_and_matter_detailed()
         assert len(rows_before) == 1
-        _, _, total_before, not_inv_before = rows_before[0]
+        _, _, total_before, not_inv_before, _, _, _ = rows_before[0]
         assert not_inv_before == total_before
         # Mark one entry as invoiced
         entries = db_user1.get_time_entries_for_day(date.today())
@@ -288,7 +290,7 @@ class TestReportingAggregation:
             db_user1.mark_entries_invoiced([entries[0].id])
             rows_after = db_user1.get_time_by_client_and_matter_detailed()
             assert len(rows_after) == 1
-            _, _, total_after, not_inv_after = rows_after[0]
+            _, _, total_after, not_inv_after, _, _, _ = rows_after[0]
             assert total_after == total_before
             assert not_inv_after < total_after
 
@@ -301,9 +303,79 @@ class TestReportingAggregation:
         simple = db_user1.get_time_by_client_and_matter()
         detailed = db_user1.get_time_by_client_and_matter_detailed()
         simple_by_key = {(c, p): sec for c, p, sec in simple}
-        for c, p, total, _ in detailed:
+        for c, p, total, *_ in detailed:
             assert (c, p) in simple_by_key
             assert simple_by_key[(c, p)] == total
+
+
+# --- hourly rate resolution and update_matter / update_user ---
+
+
+class TestHourlyRates:
+    """get_resolved_hourly_rate precedence, update_matter, update_user default_hourly_rate_euro."""
+
+    def test_resolved_rate_matter_overrides_ancestor_and_user(self, db_user1: DatabaseManager):
+        """When matter has hourly_rate_euro set, use it (source matter)."""
+        db_user1.update_user(db_user1.current_user_id, default_hourly_rate_euro=10.0)
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        db_user1.update_matter(client.id, hourly_rate_euro=20.0)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        db_user1.update_matter(project.id, hourly_rate_euro=30.0)
+        rate, source = db_user1.get_resolved_hourly_rate(project.id)
+        assert rate == 30.0
+        assert source == "matter"
+
+    def test_resolved_rate_client_overrides_user(self, db_user1: DatabaseManager):
+        """When only client (root) has rate, use it (source upper_matter)."""
+        db_user1.update_user(db_user1.current_user_id, default_hourly_rate_euro=10.0)
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        db_user1.update_matter(client.id, hourly_rate_euro=25.0)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        rate, source = db_user1.get_resolved_hourly_rate(project.id)
+        assert rate == 25.0
+        assert source == "upper_matter"
+
+    def test_resolved_rate_user_fallback(self, db_user1: DatabaseManager):
+        """When no matter or client rate, use user default (source user)."""
+        db_user1.update_user(db_user1.current_user_id, default_hourly_rate_euro=15.0)
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        rate, source = db_user1.get_resolved_hourly_rate(project.id)
+        assert rate == 15.0
+        assert source == "user"
+
+    def test_resolved_rate_none_returns_zero(self, db_user1: DatabaseManager):
+        """When user has no default and no matter rates, return 0 and source user."""
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        rate, source = db_user1.get_resolved_hourly_rate(project.id)
+        assert rate == 0.0
+        assert source == "user"
+
+    def test_amount_eur_from_seconds(self):
+        """amount_eur_from_seconds computes (duration_sec / 3600) * rate, rounded to 2 decimals."""
+        assert DatabaseManager.amount_eur_from_seconds(3600, 100.0) == 100.0
+        assert DatabaseManager.amount_eur_from_seconds(1800, 80.0) == 40.0
+        assert DatabaseManager.amount_eur_from_seconds(3600, 33.333) == 33.33
+
+    def test_update_matter_hourly_rate(self, db_user1: DatabaseManager):
+        """update_matter can set and clear hourly_rate_euro."""
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        db_user1.update_matter(client.id, hourly_rate_euro=50.0)
+        matters = db_user1.get_all_matters()
+        m = next(x for x in matters if x.id == client.id)
+        assert getattr(m, "hourly_rate_euro", None) == 50.0
+        db_user1.update_matter(client.id, hourly_rate_euro=None)
+        matters = db_user1.get_all_matters()
+        m = next(x for x in matters if x.id == client.id)
+        assert getattr(m, "hourly_rate_euro", None) is None
+
+    def test_update_user_default_hourly_rate(self, db_user1: DatabaseManager):
+        """update_user can set default_hourly_rate_euro."""
+        uid = db_user1.current_user_id
+        db_user1.update_user(uid, default_hourly_rate_euro=99.5)
+        u = db_user1.get_user(uid)
+        assert getattr(u, "default_hourly_rate_euro", None) == 99.5
 
 
 # --- backup / restore ---
