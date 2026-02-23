@@ -1684,8 +1684,9 @@ class SentinelApp:
             by_client[client_name].append((matter_path, total_seconds, not_invoiced_seconds))
 
         def on_sort_change(e):
-            if page.data is not None and e.control.value:
-                page.data["reporting_sort"] = e.control.value
+            val = getattr(e.control, "value", None) or getattr(e, "data", None)
+            if page.data is not None and val:
+                page.data["reporting_sort"] = val
                 refresh = (page.data or {}).get("refresh_reporting")
                 if refresh:
                     refresh()
@@ -1695,10 +1696,10 @@ class SentinelApp:
             width=280,
             value=sort_value,
             options=[
-                ft.dropdown.Option("most_uninvoiced", "Most not invoiced time"),
-                ft.dropdown.Option("most_accrued", "Most accrued (total) time"),
+                ft.DropdownOption(key="most_uninvoiced", text="Most not invoiced time"),
+                ft.DropdownOption(key="most_accrued", text="Most accrued (total) time"),
             ],
-            on_change=on_sort_change,
+            on_select=on_sort_change,
         )
 
         client_order = sorted(
