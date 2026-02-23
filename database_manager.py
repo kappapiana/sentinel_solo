@@ -923,6 +923,16 @@ class DatabaseManager:
                     entry.duration_seconds = dur
             session.commit()
 
+    def delete_time_entry(self, entry_id: int) -> None:
+        """Delete a time entry. Entry must belong to current user (or admin can delete any)."""
+        self._require_user()
+        with self._session() as session:
+            entry = self._time_entry_query(session).filter(TimeEntry.id == entry_id).first()
+            if entry is None:
+                raise ValueError("Time entry not found.")
+            session.delete(entry)
+            session.commit()
+
     def add_manual_time_entry(
         self,
         matter_id: int,

@@ -330,10 +330,13 @@ class SentinelApp:
                 timer_label.current.value = "00:00:00"
             start_time_section_ref = (page.data or {}).get("_timer_start_time_section_ref")
             start_time_field_ref = (page.data or {}).get("_timer_start_time_field_ref")
+            desc_ref = (page.data or {}).get("_timer_description_ref")
             if start_time_section_ref and start_time_section_ref.current:
                 start_time_section_ref.current.visible = True
             if start_time_field_ref and start_time_field_ref.current:
                 start_time_field_ref.current.value = format_datetime(start_time_ref[0])
+            if desc_ref and desc_ref.current:
+                desc_ref.current.value = (new_entry.description or "").strip()
             page.run_task(timer_loop)
             page.snack_bar = ft.SnackBar(ft.Text("Continued task; timer running."), open=True)
             page.update()
@@ -524,11 +527,18 @@ class SentinelApp:
                     new_start = datetime.combine(day, t)
                     dur = entry.duration_seconds or 0.0
                     new_end = new_start + timedelta(seconds=dur)
-                    try:
-                        self.db.update_time_entry(eid, start_time=new_start, end_time=new_end, duration_seconds=dur)
-                        page.snack_bar = ft.SnackBar(ft.Text("Start updated."), open=True)
-                    except ValueError as err:
-                        page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                    if dur <= 0:
+                        try:
+                            self.db.delete_time_entry(eid)
+                            page.snack_bar = ft.SnackBar(ft.Text("Entry removed (zero duration)."), open=True)
+                        except ValueError as err:
+                            page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                    else:
+                        try:
+                            self.db.update_time_entry(eid, start_time=new_start, end_time=new_end, duration_seconds=dur)
+                            page.snack_bar = ft.SnackBar(ft.Text("Start updated."), open=True)
+                        except ValueError as err:
+                            page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                     _refresh_activities()
                     page.update()
 
@@ -548,11 +558,18 @@ class SentinelApp:
                         page.snack_bar = ft.SnackBar(ft.Text("End must be after start."), open=True)
                         page.update()
                         return
-                    try:
-                        self.db.update_time_entry(eid, start_time=entry.start_time, end_time=new_end)
-                        page.snack_bar = ft.SnackBar(ft.Text("End updated."), open=True)
-                    except ValueError as err:
-                        page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                    if new_dur <= 0:
+                        try:
+                            self.db.delete_time_entry(eid)
+                            page.snack_bar = ft.SnackBar(ft.Text("Entry removed (zero duration)."), open=True)
+                        except ValueError as err:
+                            page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                    else:
+                        try:
+                            self.db.update_time_entry(eid, start_time=entry.start_time, end_time=new_end)
+                            page.snack_bar = ft.SnackBar(ft.Text("End updated."), open=True)
+                        except ValueError as err:
+                            page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                     _refresh_activities()
                     page.update()
 
@@ -561,15 +578,24 @@ class SentinelApp:
                     if not entry:
                         return
                     hours = parse_duration_hours(s or "")
-                    if hours is None or hours < 0:
+                    if hours is None:
+                        return
+                    if hours < 0:
                         return
                     new_dur = hours * 3600.0
-                    new_end = entry.start_time + timedelta(seconds=new_dur)
-                    try:
-                        self.db.update_time_entry(eid, start_time=entry.start_time, duration_seconds=new_dur)
-                        page.snack_bar = ft.SnackBar(ft.Text("Duration updated."), open=True)
-                    except ValueError as err:
-                        page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                    if new_dur <= 0:
+                        try:
+                            self.db.delete_time_entry(eid)
+                            page.snack_bar = ft.SnackBar(ft.Text("Entry removed (zero duration)."), open=True)
+                        except ValueError as err:
+                            page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                    else:
+                        new_end = entry.start_time + timedelta(seconds=new_dur)
+                        try:
+                            self.db.update_time_entry(eid, start_time=entry.start_time, duration_seconds=new_dur)
+                            page.snack_bar = ft.SnackBar(ft.Text("Duration updated."), open=True)
+                        except ValueError as err:
+                            page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                     _refresh_activities()
                     page.update()
 
@@ -584,7 +610,7 @@ class SentinelApp:
                     page.update()
 
                 continue_btn = ft.OutlinedButton(
-                    "Continue",
+                    content=ft.Text("Continue", size=11),
                     width=90,
                     on_click=lambda e, eid=entry_id: _on_continue_task(eid),
                 )
@@ -660,6 +686,7 @@ class SentinelApp:
             page.data = {}
         page.data["_timer_start_time_section_ref"] = start_time_section_ref
         page.data["_timer_start_time_field_ref"] = start_time_field_ref
+        page.data["_timer_description_ref"] = description_ref
         label = ft.Text(
             ref=timer_label,
             value="00:00:00",
@@ -1327,7 +1354,10 @@ class SentinelApp:
                         ),
                         trailing=ft.Row(
                             [
-                                ft.OutlinedButton("Continue", on_click=lambda e, ent=entry: _on_continue_from_dialog(ent)),
+                                ft.OutlinedButton(
+                                    content=ft.Text("Continue", size=11),
+                                    on_click=lambda e, ent=entry: _on_continue_from_dialog(ent),
+                                ),
                                 ft.IconButton(icon=ft.Icons.EDIT, on_click=lambda e, ent=entry: open_edit_entry_dialog(ent)),
                             ],
                             spacing=4,
