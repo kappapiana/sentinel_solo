@@ -1021,6 +1021,46 @@ class DatabaseManager:
             result.sort(key=lambda r: (r[0], r[1]))
             return result
 
+    def get_time_by_client_and_matter_detailed(
+        self,
+        date_from: date | None = None,
+        date_to: date | None = None,
+    ) -> list[tuple[str, str, float, float]]:
+        """Like get_time_by_client_and_matter but returns (client, matter_path, total_seconds, not_invoiced_seconds)."""
+        self._require_user()
+        with self._session() as session:
+            q = self._time_entry_query(session).filter(
+                TimeEntry.end_time.isnot(None)
+            )
+            if date_from is not None:
+                start_dt = datetime.combine(date_from, datetime.min.time())
+                q = q.filter(TimeEntry.start_time >= start_dt)
+            if date_to is not None:
+                end_dt = datetime.combine(date_to, datetime.max.time())
+                q = q.filter(TimeEntry.start_time <= end_dt)
+            entries = q.all()
+            agg_total: dict[tuple[str, str], float] = {}
+            agg_not_invoiced: dict[tuple[str, str], float] = {}
+            for entry in entries:
+                matter = self._matter_query(session).filter(
+                    Matter.id == entry.matter_id
+                ).first()
+                if matter is None:
+                    continue
+                client_name = self._get_root_matter_name(session, matter)
+                full_path = matter.get_full_path(session)
+                key = (client_name, full_path)
+                sec = entry.duration_seconds or 0.0
+                agg_total[key] = agg_total.get(key, 0.0) + sec
+                if not entry.invoiced:
+                    agg_not_invoiced[key] = agg_not_invoiced.get(key, 0.0) + sec
+            result = [
+                (client, path, agg_total.get((client, path), 0.0), agg_not_invoiced.get((client, path), 0.0))
+                for (client, path) in agg_total
+            ]
+            result.sort(key=lambda r: (r[0], r[1]))
+            return result
+
     # --- Auth and user management ---
 
     def get_login_credentials(self, username: str) -> tuple[int, str] | None:

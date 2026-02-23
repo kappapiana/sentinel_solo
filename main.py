@@ -131,7 +131,7 @@ class SentinelApp:
     ) -> None:
         page = self.page
         page.theme_mode = ft.ThemeMode.DARK
-        page.title = f"Sentinel Solo {__version__}"
+        page.title = f"Sentinel Solo {__version__} - {current_username}"
         page.padding = 24
 
         timer_tab = self._build_timer_tab()
@@ -150,6 +150,16 @@ class SentinelApp:
             self.expanded_clients.symmetric_difference_update([client_name])
             reporting_container.content = self._build_reporting_tab(on_toggle_client)
             page.update()
+
+        if page.data is None:
+            page.data = {}
+        page.data["reporting_sort"] = page.data.get("reporting_sort") or "most_uninvoiced"
+
+        def refresh_reporting():
+            reporting_container.content = self._build_reporting_tab(on_toggle_client)
+            page.update()
+
+        page.data["refresh_reporting"] = refresh_reporting
 
         reporting_tab = self._build_reporting_tab(on_toggle_client)
         timesheet_tab = self._build_timesheet_tab()
@@ -1645,14 +1655,15 @@ class SentinelApp:
     def _build_reporting_tab(
         self,
         on_toggle_client: Callable[[str], None],
-        rows_data: list[tuple[str, str, float]] | None = None,
+        rows_data: list[tuple[str, str, float, float]] | None = None,
     ) -> ft.Control:
-        """Build the Reporting tab: clients (collapsed by default), expand to show matters."""
+        """Build the Reporting tab: clients (collapsed by default), expand to show matters; total vs not invoiced; sort by option."""
         page = self.page
         expanded_clients = self.expanded_clients
         if rows_data is None:
-            rows_data = self.db.get_time_by_client_and_matter()
+            rows_data = self.db.get_time_by_client_and_matter_detailed()
         search_results_ref = ft.Ref[ft.Column]()
+        sort_value = (page.data or {}).get("reporting_sort") or "most_uninvoiced"
 
         if not rows_data:
             return ft.Column(
@@ -1668,9 +1679,36 @@ class SentinelApp:
                 horizontal_alignment=ft.CrossAxisAlignment.START,
             )
 
-        by_client: dict[str, list[tuple[str, float]]] = defaultdict(list)
-        for client_name, matter_path, total_seconds in rows_data:
-            by_client[client_name].append((matter_path, total_seconds))
+        by_client: dict[str, list[tuple[str, float, float]]] = defaultdict(list)
+        for client_name, matter_path, total_seconds, not_invoiced_seconds in rows_data:
+            by_client[client_name].append((matter_path, total_seconds, not_invoiced_seconds))
+
+        def on_sort_change(e):
+            if page.data is not None and e.control.value:
+                page.data["reporting_sort"] = e.control.value
+                refresh = (page.data or {}).get("refresh_reporting")
+                if refresh:
+                    refresh()
+
+        sort_dropdown = ft.Dropdown(
+            label="Sort clients by",
+            width=280,
+            value=sort_value,
+            options=[
+                ft.dropdown.Option("most_uninvoiced", "Most not invoiced time"),
+                ft.dropdown.Option("most_accrued", "Most accrued (total) time"),
+            ],
+            on_change=on_sort_change,
+        )
+
+        client_order = sorted(
+            by_client.keys(),
+            key=lambda c: (
+                sum(ni for _, _, ni in by_client[c]) if sort_value == "most_uninvoiced"
+                else sum(t for _, t, _ in by_client[c])
+            ),
+            reverse=True,
+        )
 
         def on_search(e):
             if not search_results_ref.current:
@@ -1687,9 +1725,12 @@ class SentinelApp:
                 search_results_ref.current.controls = [
                     ft.ListTile(
                         title=ft.Text(matter_path, size=14),
-                        subtitle=ft.Text(f"{client_name} · {format_elapsed(sec)}", size=12),
+                        subtitle=ft.Text(
+                            f"{client_name} · Total {format_elapsed(sec)} · Not invoiced {format_elapsed(ni)}",
+                            size=12,
+                        ),
                     )
-                    for client_name, matter_path, sec in matching
+                    for client_name, matter_path, sec, ni in matching
                 ]
                 search_results_ref.current.visible = bool(matching)
             page.update()
@@ -1707,16 +1748,20 @@ class SentinelApp:
         )
 
         client_blocks = []
-        for client_name in sorted(by_client.keys()):
+        for client_name in client_order:
             matter_rows = by_client[client_name]
-            client_total_seconds = sum(sec for _, sec in matter_rows)
+            client_total = sum(t for _, t, _ in matter_rows)
+            client_not_invoiced = sum(ni for _, _, ni in matter_rows)
             is_expanded = client_name in expanded_clients
             client_blocks.append(
                 ft.Column(
                     [
                         ft.ListTile(
                             title=ft.Text(client_name, weight=ft.FontWeight.W_500),
-                            subtitle=ft.Text(f"Total {format_elapsed(client_total_seconds)}"),
+                            subtitle=ft.Text(
+                                f"Total {format_elapsed(client_total)} · Not invoiced {format_elapsed(client_not_invoiced)}",
+                                size=12,
+                            ),
                             trailing=ft.Icon(
                                 ft.Icons.EXPAND_LESS if is_expanded else ft.Icons.EXPAND_MORE,
                             ),
@@ -1727,9 +1772,14 @@ class SentinelApp:
                                 [
                                     ft.ListTile(
                                         title=ft.Text(matter_path, size=14),
-                                        subtitle=ft.Text(format_elapsed(total_seconds), size=12),
+                                        subtitle=ft.Text(
+                                            f"Total {format_elapsed(total_seconds)} · Not invoiced {format_elapsed(not_invoiced_seconds)}",
+                                            size=12,
+                                        ),
                                     )
-                                    for matter_path, total_seconds in sorted(matter_rows, key=lambda r: r[0])
+                                    for matter_path, total_seconds, not_invoiced_seconds in sorted(
+                                        matter_rows, key=lambda r: r[0]
+                                    )
                                 ],
                             ),
                             visible=is_expanded,
@@ -1743,6 +1793,8 @@ class SentinelApp:
             [
                 ft.Text("Reporting", size=24, weight=ft.FontWeight.BOLD),
                 ft.Container(height=16),
+                sort_dropdown,
+                ft.Container(height=8),
                 search_field,
                 ft.Container(height=8),
                 search_results_column,
