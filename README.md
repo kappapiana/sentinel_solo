@@ -1,18 +1,32 @@
-# Sentinel Solo (v0.0.5)
+# Sentinel Solo (v0.0.6)
 
-A desktop time-tracking app with a hierarchy of **clients** and **matters** (projects/subprojects). Log time with a timer or by manual entry; view and edit time entries per matter; move or merge matters with time ported correctly.
+A desktop time-tracking app with a hierarchy of **clients** and **matters** (projects/subprojects). Log time with a timer or by manual entry; view and edit time entries per matter; set **hourly rates** (EUR) for invoicing; move or merge matters with time ported correctly.
 
 **Tech stack:** Python 3.12, [Flet](https://flet.dev/) (GUI), SQLAlchemy. Database: SQLite (default) or PostgreSQL (remote).
 
 ## Features
 
-- **Timer** – **Today’s activities** at the top: list of today’s time entries with editable Matter, Description, Start (hh:mm), End (hh:mm), and Duration (H:MM). Changing end recalculates duration; changing start keeps duration and updates end; changing duration updates end. Description is saved when you leave the field. Below: searchable matter list (all clients shown, folded by client), optional task description, then Start/Stop or manual entry.
+- **Timer** – **Today’s activities** at the top: list of today’s time entries with editable Matter, Description, Start (hh:mm), End (hh:mm), Duration (H:MM), and **Amount (€)** (duration × applicable hourly rate, color-coded by rate source). Below: searchable matter list (all clients shown, folded by client), optional task description, then Start/Stop or manual entry.
 - **Manual entry** – Same matter selection; enter two of Start time, End time, or Duration; the third is derived. Add the entry to the selected matter.
-- **Manage Matters** – Add clients (roots) and matters (under a client or another matter). Per matter: **Move** (to another client or subproject), **Merge** (into another matter; time and children follow), **Time entries** (list, edit, add manual). New clients and matters appear in parent and timer lists immediately.
-- **Reporting** – Time by client and matter; clients collapsed by default, click to expand and see matter breakdown; optional search.
-- **Timesheet** – Select matters (searchable, folded by client; parent checkbox selects descendants). Choose where to save via the **Save to folder** field (default: Downloads or `exports/`). Export selected time entries to JSON; optionally mark exported entries as invoiced.
+- **Manage Matters** – Add clients (roots) and matters (under a client or another matter). **Add form** order: parent (for matters), then name, then **Client hourly rate (€)** or **Matter hourly rate (€)** (optional; leave empty to use default or set later). Per matter menu: **Edit rate…**, **Move**, **Merge**, **Time entries** (list with amount € per entry, edit, add manual). New clients and matters appear in parent and timer lists immediately.
+- **Reporting** – Time by client and matter with **chargeable amounts (€)**; clients collapsed by default, click to expand; amounts colored by rate source (see **Hourly rates** below).
+- **Timesheet** – Select matters (searchable, folded by client; parent checkbox selects descendants). **Preview** shows entries with duration and Amount (€) by rate source. **Save to folder** and **Export timesheet** to JSON (includes `amount_eur` and `rate_source` per entry); optionally mark exported entries as invoiced.
 
 Matters support unlimited nesting (Client → Project → Subproject…). Time can only be logged on non-root matters (i.e. under a client).
+
+### Hourly rates (EUR)
+
+Every matter and submatter has an **effective hourly rate** used to compute chargeable amounts. Precedence (all amounts in euro):
+
+1. **User default** – Set in **Users** → Edit (your user) → **Default hourly rate (€)**. Used when no client or matter rate is set.
+2. **Client rate** – For a root matter (client), set when adding (Client hourly rate €) or via **Manage Matters** → **Edit rate…**. Used for all matters under that client when they have no own rate.
+3. **Matter rate** – For a non-root matter, set when adding (Matter hourly rate €) or via **Edit rate…**. Submatters without a rate inherit the nearest ancestor’s rate.
+
+**Color convention** (wherever chargeable amounts are shown):
+
+- **Red** – User default rate.
+- **Orange** – Rate from an upper-level matter (client or parent matter).
+- **Green** – Rate specific to the matter at hand.
 
 ## Setup
 
@@ -70,24 +84,24 @@ From the project root (with venv activated):
 pytest tests/ -v
 ```
 
-- **tests/test_database_manager.py** – Hierarchical matter creation, `get_full_path` accuracy, per-owner matter code suggestion, RLS-style filtering (each user sees only their own matters and time entries), admin include-all-users and export, reporting aggregation (time by client/matter with total vs not invoiced), backup/restore (export/import full database), and require-user checks.
+- **tests/test_database_manager.py** – Hierarchical matter creation, `get_full_path` accuracy, per-owner matter code suggestion, RLS-style filtering (each user sees only their own matters and time entries), admin include-all-users and export, reporting aggregation (time by client/matter with total vs not invoiced, plus chargeable amounts and rate source), **hourly rate resolution** (matter > client > user, `add_matter` with optional `hourly_rate_euro`, `update_matter` / `update_user` rate fields, `amount_eur_from_seconds`), backup/restore (export/import full database), and require-user checks.
 - **tests/test_regression.py** – User and matter creation, `get_full_path` recursion (multi-level hierarchy), privacy/RLS (one user cannot see another’s matters), and timer start/stop with correct duration calculation.
 
 Fixtures in `tests/conftest.py` use a temporary SQLite database and two users (admin + normal).
 
 ## Project layout
 
-- **main.py** – Flet UI: Timer tab (today’s activities list + matter selector + timer/manual), Manage Matters tab, Reporting tab, Timesheet tab; dialogs for move/merge and time entries.
-- **database_manager.py** – DB access: matters, time entries, move/merge, get/update/add time entries, get time for day, suggest unique code, timesheet export.
-- **models.py** – SQLAlchemy models: `Matter` (tree via `parent_id`), `TimeEntry` (linked to matter).
+- **main.py** – Flet UI: Timer tab (today’s activities with amount column), Manage Matters tab (add client/matter with optional rate; edit rate per matter), Reporting tab (chargeable €), Timesheet tab (preview + export); dialogs for move/merge, edit matter rate, and time entries.
+- **database_manager.py** – DB access: matters (incl. `hourly_rate_euro`), time entries, rate resolution, move/merge, get/update/add time entries and matters, get time for day, timesheet export (with amount_eur and rate_source), reporting with amounts.
+- **models.py** – SQLAlchemy models: `User` (incl. `default_hourly_rate_euro`), `Matter` (tree via `parent_id`, `hourly_rate_euro`), `TimeEntry` (linked to matter).
 - **run.sh** – Linux launcher: runs the app with the project venv and optional cursor theme env vars.
 - **install.sh** – Linux installer: installs app under `~/.local` (or `--prefix`), creates venv, adds `sentinel-solo` launcher and desktop menu entry.
 - **uninstall.sh** – Linux uninstaller: removes the installed app dir, launcher, and desktop entry (use same `--prefix` as for install).
-- **tests/** – Pytest suite: `test_database_manager.py` (hierarchy, full paths, owner filtering, reporting aggregation, backup/restore), `test_regression.py` (user/matter creation, path recursion, RLS, timer duration); see **Tests** above.
+- **tests/** – Pytest suite: `test_database_manager.py` (hierarchy, full paths, owner filtering, reporting aggregation, hourly rate resolution and update_matter/update_user, backup/restore), `test_regression.py` (user/matter creation, path recursion, RLS, timer duration); see **Tests** above.
 
 ## User administration and admin user
 
-- **What it is:** The app is multi-user. Each user sees only their own matters and time entries. At least one user can be **admin**: they can create, edit, and delete other users; normal users can only change their own login data (username/password). Admins get a **Users** tab in the navigation (people icon) where they can add users (username, password, optional Admin flag), edit any user (username, password, and Admin flag for others), and delete other users (you cannot delete yourself).
+- **What it is:** The app is multi-user. Each user sees only their own matters and time entries. At least one user can be **admin**: they can create, edit, and delete other users; normal users can only change their own login data (username/password and **Default hourly rate (€)**). Admins get a **Users** tab in the navigation (people icon) where they can add users (username, password, optional Admin flag), edit any user (username, password, Default hourly rate, and Admin flag for others), and delete other users (you cannot delete yourself).
 
 - **How to get the admin user:** On first install, when there are no users in the database, the app shows a **“Create first admin”** screen: enter username and password and click **Create admin**. That user is created with admin rights and you are logged in. This works for both **SQLite** and **PostgreSQL** (no manual INSERT needed).
 
@@ -104,7 +118,8 @@ Recommend closing other sessions before restoring and re-logging in after.
 
 - **Today’s activities (Timer tab):** Edit Matter, Description, Start, End, or Duration in place. Changes are saved on blur; end/duration/start are linked as above. Duration is shown as H:MM (no seconds).
 - **Matter selection (Timer tab):** Search by name or path; all clients are listed (expand to see matters). All time (timer and manual) is logged to the matter selected there.
-- **Time entries (Manage Matters):** Open “Time entries” from a matter’s menu to see, edit, or add entries. When editing or adding, fill two of Start, End, and Duration; the third is computed.
+- **Time entries (Manage Matters):** Open “Time entries” from a matter’s menu to see, edit, or add entries; each entry shows its chargeable Amount (€) with the usual rate-source color. When editing or adding, fill two of Start, End, and Duration; the third is computed.
+- **Hourly rates:** Set your **Default hourly rate (€)** in Users → Edit (yourself). When adding a client or matter, you can set **Client hourly rate (€)** or **Matter hourly rate (€)** in the Add form (field order: parent → name → rate). You can also set or change rates later via Manage Matters → **Edit rate…** on each client or matter. Submatters without a rate use the nearest ancestor’s rate; if none, the user default.
 - **Move/Merge:** Use the matter menu (⋮) for “Move…” or “Merge…”. Target selection uses the same searchable, folded list as the Timer.
 - **Timesheet:** Set **Save to folder** to the directory where the file should go (default is your Downloads folder or the app’s `exports/` directory). Check the matters whose time you want to export, then click **Export timesheet** to save `timesheet_YYYYMMDD_HHMMSS.json` there. You can optionally mark those entries as invoiced after export.
 

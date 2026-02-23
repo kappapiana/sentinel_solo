@@ -377,6 +377,22 @@ class TestHourlyRates:
         u = db_user1.get_user(uid)
         assert getattr(u, "default_hourly_rate_euro", None) == 99.5
 
+    def test_add_matter_with_hourly_rate_euro(self, db_user1: DatabaseManager):
+        """add_matter accepts optional hourly_rate_euro; client and matter rates are persisted."""
+        client = db_user1.add_matter("Client", "client", parent_id=None, hourly_rate_euro=25.0)
+        matters = db_user1.get_all_matters()
+        m = next(x for x in matters if x.id == client.id)
+        assert getattr(m, "hourly_rate_euro", None) == 25.0
+        project = db_user1.add_matter("Project", "project", parent_id=client.id, hourly_rate_euro=50.0)
+        matters = db_user1.get_all_matters()
+        p = next(x for x in matters if x.id == project.id)
+        assert getattr(p, "hourly_rate_euro", None) == 50.0
+        # Without rate: remains None
+        sub = db_user1.add_matter("Sub", "sub", parent_id=project.id)
+        matters = db_user1.get_all_matters()
+        s = next(x for x in matters if x.id == sub.id)
+        assert getattr(s, "hourly_rate_euro", None) is None
+
 
 # --- backup / restore ---
 

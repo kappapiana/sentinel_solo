@@ -912,6 +912,7 @@ class SentinelApp:
         page = self.page
         list_ref = self.matters_list_ref
         name_field = ft.Ref[ft.TextField]()
+        add_rate_field = ft.Ref[ft.TextField]()
         parent_dropdown = ft.Ref[ft.Dropdown]()
         add_type_ref = ft.Ref[ft.SegmentedButton]()
         parent_section_ref = ft.Ref[ft.Container]()
@@ -1500,8 +1501,20 @@ class SentinelApp:
                     page.snack_bar = ft.SnackBar(ft.Text("Invalid parent selection."), open=True)
                     page.update()
                     return
+            rate_val = None
+            if add_rate_field.current and (add_rate_field.current.value or "").strip():
+                try:
+                    rate_val = float((add_rate_field.current.value or "").strip())
+                    if rate_val < 0:
+                        page.snack_bar = ft.SnackBar(ft.Text("Hourly rate must be ≥ 0."), open=True)
+                        page.update()
+                        return
+                except ValueError:
+                    page.snack_bar = ft.SnackBar(ft.Text("Hourly rate must be a number or empty."), open=True)
+                    page.update()
+                    return
             try:
-                self.db.add_matter(name=n, matter_code=c, parent_id=pid)
+                self.db.add_matter(name=n, matter_code=c, parent_id=pid, hourly_rate_euro=rate_val)
             except IntegrityError:
                 page.snack_bar = ft.SnackBar(
                     ft.Text("A matter with this name already exists or could not generate a unique code."),
@@ -1512,6 +1525,8 @@ class SentinelApp:
             name_field.current.value = ""
             if parent_dropdown.current:
                 parent_dropdown.current.value = None
+            if add_rate_field.current:
+                add_rate_field.current.value = ""
             refresh_list()
             refresh_parent_dropdown()
             if on_matters_changed:
@@ -1532,6 +1547,8 @@ class SentinelApp:
                 parent_section_ref.current.visible = is_matter
                 if is_matter:
                     refresh_parent_dropdown()
+                if add_rate_field.current:
+                    add_rate_field.current.label = "Matter hourly rate (€)" if is_matter else "Client hourly rate (€)"
                 page.update()
     
         def on_search(e):
@@ -1743,8 +1760,14 @@ class SentinelApp:
                 ft.Container(height=4),
                 add_type_button,
                 ft.Container(height=16),
-                ft.TextField(ref=name_field, label="Name", width=400),
                 parent_section,
+                ft.TextField(ref=name_field, label="Name", width=400),
+                ft.TextField(
+                    ref=add_rate_field,
+                    label="Client hourly rate (€)",
+                    width=400,
+                    hint_text="Optional; leave empty to use user default or set later",
+                ),
                 ft.Container(height=8),
                 ft.ElevatedButton("Add", icon=ft.Icons.ADD, on_click=on_add),
                 ft.Container(height=24),

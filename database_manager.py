@@ -380,9 +380,13 @@ class DatabaseManager:
         return f"{slug}-{n}"
 
     def add_matter(
-        self, name: str, matter_code: str, parent_id: int | None = None
+        self,
+        name: str,
+        matter_code: str,
+        parent_id: int | None = None,
+        hourly_rate_euro: float | None = None,
     ) -> Matter:
-        """Add a new matter. Returns the created Matter."""
+        """Add a new matter. Returns the created Matter. Optional hourly_rate_euro for client/matter rate."""
         self._require_user()
         with self._session() as session:
             matter = Matter(
@@ -390,6 +394,7 @@ class DatabaseManager:
                 name=name,
                 matter_code=matter_code,
                 parent_id=parent_id,
+                hourly_rate_euro=hourly_rate_euro,
             )
             session.add(matter)
             session.commit()
