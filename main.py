@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 
 from database_manager import DatabaseManager, db
 
-__version__ = "v0.0.6"
+__version__ = "v0.0.7"
 
 # Storage keys for persisted login (optional restore)
 STORAGE_USER_ID = "user_id"
