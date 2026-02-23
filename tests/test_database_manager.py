@@ -247,6 +247,65 @@ class TestOwnerFiltering:
         assert "User2" in entries[0]["matter_path"]
 
 
+# --- reporting aggregation (time by client/matter, total vs not invoiced) ---
+
+
+class TestReportingAggregation:
+    """get_time_by_client_and_matter and get_time_by_client_and_matter_detailed."""
+
+    def test_get_time_by_client_and_matter_detailed_returns_total_and_not_invoiced(
+        self, db_user1: DatabaseManager
+    ):
+        """Detailed returns (client, matter_path, total_seconds, not_invoiced_seconds)."""
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        db_user1.start_timer(project.id, "Work")
+        db_user1.stop_timer()
+        rows = db_user1.get_time_by_client_and_matter_detailed()
+        assert len(rows) >= 1
+        for client_name, matter_path, total, not_invoiced in rows:
+            assert total >= 0
+            assert not_invoiced >= 0
+            assert not_invoiced <= total
+
+    def test_get_time_by_client_and_matter_detailed_invoiced_excluded_from_not_invoiced(
+        self, db_user1: DatabaseManager
+    ):
+        """When entries are marked invoiced, not_invoiced is less than total."""
+        client = db_user1.add_matter("Client", "client", parent_id=None)
+        project = db_user1.add_matter("Project", "project", parent_id=client.id)
+        db_user1.start_timer(project.id, "A")
+        db_user1.stop_timer()
+        db_user1.start_timer(project.id, "B")
+        db_user1.stop_timer()
+        rows_before = db_user1.get_time_by_client_and_matter_detailed()
+        assert len(rows_before) == 1
+        _, _, total_before, not_inv_before = rows_before[0]
+        assert not_inv_before == total_before
+        # Mark one entry as invoiced
+        entries = db_user1.get_time_entries_for_day(date.today())
+        if len(entries) >= 1:
+            db_user1.mark_entries_invoiced([entries[0].id])
+            rows_after = db_user1.get_time_by_client_and_matter_detailed()
+            assert len(rows_after) == 1
+            _, _, total_after, not_inv_after = rows_after[0]
+            assert total_after == total_before
+            assert not_inv_after < total_after
+
+    def test_get_time_by_client_and_matter_matches_detailed_totals(self, db_user1: DatabaseManager):
+        """Original get_time_by_client_and_matter total equals detailed total."""
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        db_user1.start_timer(project.id)
+        db_user1.stop_timer()
+        simple = db_user1.get_time_by_client_and_matter()
+        detailed = db_user1.get_time_by_client_and_matter_detailed()
+        simple_by_key = {(c, p): sec for c, p, sec in simple}
+        for c, p, total, _ in detailed:
+            assert (c, p) in simple_by_key
+            assert simple_by_key[(c, p)] == total
+
+
 # --- backup / restore ---
 
 

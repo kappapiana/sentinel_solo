@@ -70,7 +70,7 @@ From the project root (with venv activated):
 pytest tests/ -v
 ```
 
-- **tests/test_database_manager.py** – Hierarchical matter creation, `get_full_path` accuracy, per-owner matter code suggestion, and RLS-style filtering (each user sees only their own matters and time entries).
+- **tests/test_database_manager.py** – Hierarchical matter creation, `get_full_path` accuracy, per-owner matter code suggestion, RLS-style filtering (each user sees only their own matters and time entries), admin include-all-users and export, reporting aggregation (time by client/matter with total vs not invoiced), backup/restore (export/import full database), and require-user checks.
 - **tests/test_regression.py** – User and matter creation, `get_full_path` recursion (multi-level hierarchy), privacy/RLS (one user cannot see another’s matters), and timer start/stop with correct duration calculation.
 
 Fixtures in `tests/conftest.py` use a temporary SQLite database and two users (admin + normal).
@@ -83,7 +83,7 @@ Fixtures in `tests/conftest.py` use a temporary SQLite database and two users (a
 - **run.sh** – Linux launcher: runs the app with the project venv and optional cursor theme env vars.
 - **install.sh** – Linux installer: installs app under `~/.local` (or `--prefix`), creates venv, adds `sentinel-solo` launcher and desktop menu entry.
 - **uninstall.sh** – Linux uninstaller: removes the installed app dir, launcher, and desktop entry (use same `--prefix` as for install).
-- **tests/** – Pytest suite: `test_database_manager.py` (hierarchy, full paths, owner filtering), `test_regression.py` (user/matter creation, path recursion, RLS, timer duration); see **Tests** above.
+- **tests/** – Pytest suite: `test_database_manager.py` (hierarchy, full paths, owner filtering, reporting aggregation, backup/restore), `test_regression.py` (user/matter creation, path recursion, RLS, timer duration); see **Tests** above.
 
 ## User administration and admin user
 
