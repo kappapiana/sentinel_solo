@@ -84,7 +84,7 @@ From the project root (with venv activated):
 pytest tests/ -v
 ```
 
-- **tests/test_database_manager.py** – Hierarchical matter creation, `get_full_path` accuracy, per-owner matter code suggestion, RLS-style filtering (each user sees only their own matters and time entries), admin include-all-users and export, reporting aggregation (time by client/matter with total vs not invoiced, plus chargeable amounts and rate source), **hourly rate resolution** (matter > client > user, `add_matter` with optional `hourly_rate_euro`, `update_matter` / `update_user` rate fields, `amount_eur_from_seconds`), backup/restore (export/import full database), and require-user checks.
+- **tests/test_database_manager.py** – Hierarchical matter creation, `get_full_path` accuracy, per-owner matter code suggestion, RLS-style filtering (each user sees only their own matters and time entries), admin include-all-users and export, reporting aggregation (time by client/matter with total vs not invoiced, plus chargeable amounts and rate source), **hourly rate resolution** (matter > client > user, `add_matter` with optional `hourly_rate_euro`, `update_matter` / `update_user` rate fields, `amount_eur_from_seconds`), **continue_time_entry** (activity group chaining), **delete_time_entry** (remove entry, owner-scoped), backup/restore (export/import full database), and require-user checks.
 - **tests/test_regression.py** – User and matter creation, `get_full_path` recursion (multi-level hierarchy), privacy/RLS (one user cannot see another’s matters), and timer start/stop with correct duration calculation.
 
 Fixtures in `tests/conftest.py` use a temporary SQLite database and two users (admin + normal).
@@ -97,7 +97,7 @@ Fixtures in `tests/conftest.py` use a temporary SQLite database and two users (a
 - **run.sh** – Linux launcher: runs the app with the project venv and optional cursor theme env vars.
 - **install.sh** – Linux installer: installs app under `~/.local` (or `--prefix`), creates venv, adds `sentinel-solo` launcher and desktop menu entry.
 - **uninstall.sh** – Linux uninstaller: removes the installed app dir, launcher, and desktop entry (use same `--prefix` as for install).
-- **tests/** – Pytest suite: `test_database_manager.py` (hierarchy, full paths, owner filtering, reporting aggregation, hourly rate resolution and update_matter/update_user, backup/restore), `test_regression.py` (user/matter creation, path recursion, RLS, timer duration); see **Tests** above.
+- **tests/** – Pytest suite: `test_database_manager.py` (hierarchy, full paths, owner filtering, reporting aggregation, hourly rate resolution, continue_time_entry, delete_time_entry, backup/restore), `test_regression.py` (user/matter creation, path recursion, RLS, timer duration); see **Tests** above.
 
 ## User administration and admin user
 

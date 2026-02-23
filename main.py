@@ -2135,7 +2135,22 @@ class SentinelApp:
                 ]
             controls = []
             by_client = _options_by_client_timesheet(path_list)
-            for client_name in sorted(by_client.keys()):
+            # Reuse reporting sort preference: most not-invoiced or most accrued (total) time
+            sort_value = (page.data or {}).get("reporting_sort") or "most_uninvoiced"
+            rows_data = self.db.get_time_by_client_and_matter_detailed()
+            client_sort_key: dict[str, float] = defaultdict(float)
+            for row in rows_data:
+                client_name, _, total_sec, not_inv_sec, *_ = row
+                if sort_value == "most_uninvoiced":
+                    client_sort_key[client_name] += not_inv_sec
+                else:
+                    client_sort_key[client_name] += total_sec
+            client_order = sorted(
+                by_client.keys(),
+                key=lambda c: client_sort_key.get(c, 0.0),
+                reverse=True,
+            )
+            for client_name in client_order:
                 items = by_client[client_name]
                 mids = [mid for mid, _ in items]
                 is_exp = client_name in timesheet_expanded
@@ -2224,6 +2239,12 @@ class SentinelApp:
                     timesheet_search_ref.current.value
                 )
                 page.update()
+
+        def _on_timesheet_sort_change(e):
+            val = getattr(e.control, "value", None) or getattr(e, "data", None)
+            if page.data is not None and val:
+                page.data["reporting_sort"] = val
+                refresh_timesheet_list()
 
         def _show_mark_invoiced_dialog(out_path: Path, entry_ids: list):
             def _on_mark_yes(_):
@@ -2381,7 +2402,23 @@ class SentinelApp:
                     height=180,
                 ),
                 ft.Container(height=16),
-                ft.Text("Matters", size=16, weight=ft.FontWeight.W_500),
+                ft.Row(
+                    [
+                        ft.Text("Matters", size=16, weight=ft.FontWeight.W_500),
+                        ft.Dropdown(
+                            label="Sort clients by",
+                            width=280,
+                            value=(page.data or {}).get("reporting_sort") or "most_uninvoiced",
+                            options=[
+                                ft.DropdownOption(key="most_uninvoiced", text="Most not invoiced time"),
+                                ft.DropdownOption(key="most_accrued", text="Most accrued (total) time"),
+                            ],
+                            on_select=_on_timesheet_sort_change,
+                        ),
+                    ],
+                    spacing=24,
+                    alignment=ft.MainAxisAlignment.START,
+                ),
                 ft.Container(height=8),
                 ft.Container(content=list_column, expand=True),
             ],

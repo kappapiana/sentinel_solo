@@ -2,7 +2,7 @@
 Pytest suite for database_manager.py.
 Focus: hierarchical matter creation, get_full_path accuracy, RLS-style owner filtering.
 """
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -434,6 +434,49 @@ class TestContinueTimeEntry:
         """continue_time_entry with non-existent or other user's entry raises."""
         with pytest.raises(ValueError, match="not found"):
             db_user1.continue_time_entry(99999)
+
+
+# --- delete_time_entry ---
+
+
+class TestDeleteTimeEntry:
+    """delete_time_entry removes an entry; owner-scoped like other time entry ops."""
+
+    def test_delete_time_entry_removes_entry(self, db_user1: DatabaseManager):
+        """After delete, the entry is no longer returned by get_time_entries_for_day."""
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        today = date.today()
+        start = datetime.combine(today, datetime.min.time().replace(hour=9, minute=0))
+        end = start + timedelta(hours=1)
+        entry = db_user1.add_manual_time_entry(
+            project.id, "Work", start_time=start, end_time=end
+        )
+        day_entries = db_user1.get_time_entries_for_day(today)
+        assert any(e.id == entry.id for e in day_entries)
+        db_user1.delete_time_entry(entry.id)
+        day_entries_after = db_user1.get_time_entries_for_day(today)
+        assert not any(e.id == entry.id for e in day_entries_after)
+
+    def test_delete_time_entry_invalid_id_raises(self, db_user1: DatabaseManager):
+        """delete_time_entry with non-existent id raises."""
+        with pytest.raises(ValueError, match="Time entry not found"):
+            db_user1.delete_time_entry(99999)
+
+    def test_delete_time_entry_other_users_entry_raises(
+        self, db_user1: DatabaseManager, db_user2: DatabaseManager
+    ):
+        """User cannot delete another user's time entry (RLS: not found)."""
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        today = date.today()
+        start = datetime.combine(today, datetime.min.time().replace(hour=10, minute=0))
+        end = start + timedelta(minutes=30)
+        entry = db_user1.add_manual_time_entry(
+            project.id, "User1 work", start_time=start, end_time=end
+        )
+        with pytest.raises(ValueError, match="Time entry not found"):
+            db_user2.delete_time_entry(entry.id)
 
 
 # --- backup / restore ---
