@@ -610,7 +610,7 @@ class SentinelApp:
                     page.update()
 
                 continue_btn = ft.OutlinedButton(
-                    content=ft.Text("Continue", size=11),
+                    content=ft.Text("Continue", size=9, no_wrap=True),
                     width=90,
                     on_click=lambda e, eid=entry_id: _on_continue_task(eid),
                 )
@@ -1355,7 +1355,7 @@ class SentinelApp:
                         trailing=ft.Row(
                             [
                                 ft.OutlinedButton(
-                                    content=ft.Text("Continue", size=11),
+                                    content=ft.Text("Continue", size=9, no_wrap=True),
                                     on_click=lambda e, ent=entry: _on_continue_from_dialog(ent),
                                 ),
                                 ft.IconButton(icon=ft.Icons.EDIT, on_click=lambda e, ent=entry: open_edit_entry_dialog(ent)),
