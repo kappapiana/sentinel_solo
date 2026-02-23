@@ -2137,9 +2137,15 @@ class SentinelApp:
             by_client = _options_by_client_timesheet(path_list)
             for client_name in sorted(by_client.keys()):
                 items = by_client[client_name]
+                mids = [mid for mid, _ in items]
                 is_exp = client_name in timesheet_expanded
+                client_all_checked = all(mid in timesheet_selected_ids for mid in mids)
                 controls.append(
                     ft.ListTile(
+                        leading=ft.Checkbox(
+                            value=client_all_checked,
+                            on_change=lambda e, m=mids: _on_timesheet_client_check(m, e.control.value),
+                        ),
                         title=ft.Text(client_name, weight=ft.FontWeight.W_500, size=14),
                         subtitle=ft.Text(f"{len(items)} matter(s)", size=12),
                         trailing=ft.Icon(ft.Icons.EXPAND_LESS if is_exp else ft.Icons.EXPAND_MORE, size=20),
@@ -2193,6 +2199,19 @@ class SentinelApp:
                 )
             else:
                 timesheet_selected_ids.discard(matter_id)
+            if timesheet_list_ref.current:
+                timesheet_list_ref.current.controls = _build_timesheet_list_controls(
+                    timesheet_search_ref.current.value if timesheet_search_ref.current else ""
+                )
+                page.update()
+
+        def _on_timesheet_client_check(matter_ids: list[int], checked: bool):
+            """Check/uncheck client checkbox: select or clear all matters for that client."""
+            nonlocal timesheet_selected_ids
+            if checked:
+                timesheet_selected_ids |= set(matter_ids)
+            else:
+                timesheet_selected_ids -= set(matter_ids)
             if timesheet_list_ref.current:
                 timesheet_list_ref.current.controls = _build_timesheet_list_controls(
                     timesheet_search_ref.current.value if timesheet_search_ref.current else ""
