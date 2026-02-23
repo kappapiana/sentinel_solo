@@ -311,6 +311,33 @@ class SentinelApp:
         matter_dropdown = self.matter_dropdown_ref
         running_ref = self.running_ref
         start_time_ref = self.start_time_ref
+        timer_label = self.timer_label_ref
+
+        def _on_continue_task(entry_id: int):
+            """Create a new running entry with same matter/description (Continue task) and start timer UI."""
+            try:
+                new_entry = self.db.continue_time_entry(entry_id)
+            except ValueError as err:
+                page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                page.update()
+                return
+            refresh = (page.data or {}).get("refresh_timer_activities")
+            if callable(refresh):
+                refresh()
+            start_time_ref[0] = new_entry.start_time
+            running_ref[0] = True
+            if timer_label.current:
+                timer_label.current.value = "00:00:00"
+            start_time_section_ref = (page.data or {}).get("_timer_start_time_section_ref")
+            start_time_field_ref = (page.data or {}).get("_timer_start_time_field_ref")
+            if start_time_section_ref and start_time_section_ref.current:
+                start_time_section_ref.current.visible = True
+            if start_time_field_ref and start_time_field_ref.current:
+                start_time_field_ref.current.value = format_datetime(start_time_ref[0])
+            page.run_task(timer_loop)
+            page.snack_bar = ft.SnackBar(ft.Text("Continued task; timer running."), open=True)
+            page.update()
+
         # Selectable matters only (non-roots); used for selection and search
         options = self.db.get_matters_with_full_paths(for_timer=True)
         timer_matter_selected: list = [options[0][0], options[0][1]] if options else [None, None]
@@ -556,9 +583,14 @@ class SentinelApp:
                     _refresh_activities()
                     page.update()
 
+                continue_btn = ft.OutlinedButton(
+                    "Continue",
+                    width=90,
+                    on_click=lambda e, eid=entry_id: _on_continue_task(eid),
+                )
                 rows.append(
                     ft.Row(
-                        [matter_dd, desc_tf, start_tf, end_tf, duration_tf, amount_text],
+                        [matter_dd, desc_tf, start_tf, end_tf, duration_tf, amount_text, continue_btn],
                         spacing=12,
                         alignment=ft.MainAxisAlignment.START,
                     )
@@ -574,6 +606,7 @@ class SentinelApp:
                     ft.Text("End", size=12, weight=ft.FontWeight.W_500, width=90),
                     ft.Text("Duration", size=12, weight=ft.FontWeight.W_500, width=100),
                     ft.Text("Amount (€)", size=12, weight=ft.FontWeight.W_500, width=90),
+                    ft.Container(width=90),
                 ],
                 spacing=12,
             )
@@ -623,6 +656,10 @@ class SentinelApp:
         manual_section_ref = ft.Ref[ft.Container]()
         start_time_field_ref = ft.Ref[ft.TextField]()
         start_time_section_ref = ft.Ref[ft.Container]()
+        if page.data is None:
+            page.data = {}
+        page.data["_timer_start_time_section_ref"] = start_time_section_ref
+        page.data["_timer_start_time_field_ref"] = start_time_field_ref
         label = ft.Text(
             ref=timer_label,
             value="00:00:00",
@@ -1268,6 +1305,15 @@ class SentinelApp:
                 rate, rate_source = self.db.get_resolved_hourly_rate(entry.matter_id, entry.owner_id)
                 amount_eur = self.db.amount_eur_from_seconds(dur_sec, rate)
                 amount_color = _rate_source_color(rate_source)
+                def _on_continue_from_dialog(ent):
+                    try:
+                        self.db.continue_time_entry(ent.id)
+                        refresh_time_entries_list()
+                        page.snack_bar = ft.SnackBar(ft.Text("Continued task; new entry is running. Switch to Timer to see it."), open=True)
+                    except ValueError as err:
+                        page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                    page.update()
+
                 controls.append(
                     ft.ListTile(
                         title=ft.Text(desc or "(no description)", size=14),
@@ -1279,7 +1325,13 @@ class SentinelApp:
                             ],
                             wrap=True,
                         ),
-                        trailing=ft.IconButton(icon=ft.Icons.EDIT, on_click=lambda e, ent=entry: open_edit_entry_dialog(ent)),
+                        trailing=ft.Row(
+                            [
+                                ft.OutlinedButton("Continue", on_click=lambda e, ent=entry: _on_continue_from_dialog(ent)),
+                                ft.IconButton(icon=ft.Icons.EDIT, on_click=lambda e, ent=entry: open_edit_entry_dialog(ent)),
+                            ],
+                            spacing=4,
+                        ),
                     ),
                 )
             return controls
@@ -1985,6 +2037,15 @@ class SentinelApp:
             if not entries:
                 preview_controls = [ft.Text("No entries to show.", size=14)]
             else:
+                # Group by logical activity (same matter, description, activity_group_id) and aggregate duration and amount
+                groups: dict[tuple[str, str, int | None], list[dict]] = {}
+                for e in entries:
+                    key = (
+                        e.get("matter_path") or "",
+                        e.get("description") or "",
+                        e.get("activity_group_id") if e.get("activity_group_id") is not None else e.get("id"),
+                    )
+                    groups.setdefault(key, []).append(e)
                 preview_controls = [
                     ft.Row(
                         [
@@ -1996,18 +2057,18 @@ class SentinelApp:
                         spacing=8,
                     ),
                 ]
-                for e in entries:
-                    dur = e.get("duration_seconds", 0) or 0
-                    amount_eur = e.get("amount_eur", 0.0)
-                    rate_source = e.get("rate_source", "user")
+                for (matter_path, description, _), group_entries in sorted(groups.items(), key=lambda x: (x[0][0], x[0][1])):
+                    total_dur = sum(ent.get("duration_seconds", 0) or 0 for ent in group_entries)
+                    total_amount = sum(ent.get("amount_eur", 0.0) or 0 for ent in group_entries)
+                    rate_source = group_entries[0].get("rate_source", "user")
                     color = _rate_source_color(rate_source)
                     preview_controls.append(
                         ft.Row(
                             [
-                                ft.Text((e.get("matter_path") or "")[:40], size=12, width=280, overflow=ft.TextOverflow.ELLIPSIS),
-                                ft.Text((e.get("description") or "")[:30], size=12, width=180, overflow=ft.TextOverflow.ELLIPSIS),
-                                ft.Text(format_elapsed_hm(dur), size=12, width=80),
-                                ft.Text(format_eur(amount_eur), size=12, color=color, width=90),
+                                ft.Text((matter_path or "")[:40], size=12, width=280, overflow=ft.TextOverflow.ELLIPSIS),
+                                ft.Text((description or "")[:30], size=12, width=180, overflow=ft.TextOverflow.ELLIPSIS),
+                                ft.Text(format_elapsed_hm(total_dur), size=12, width=80),
+                                ft.Text(format_eur(total_amount), size=12, color=color, width=90),
                             ],
                             spacing=8,
                         )

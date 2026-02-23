@@ -394,6 +394,48 @@ class TestHourlyRates:
         assert getattr(s, "hourly_rate_euro", None) is None
 
 
+# --- continue task (activity_group_id) ---
+
+
+class TestContinueTimeEntry:
+    """continue_time_entry creates a new running entry linked to the same activity group."""
+
+    def test_continue_time_entry_creates_segment_with_same_matter_and_description(
+        self, db_user1: DatabaseManager
+    ):
+        """Continued entry has same owner, matter, description and activity_group_id points to first."""
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        db_user1.start_timer(project.id, "Task A")
+        first = db_user1.stop_timer()
+        assert first is not None
+        second = db_user1.continue_time_entry(first.id)
+        assert second.owner_id == first.owner_id
+        assert second.matter_id == first.matter_id
+        assert second.description == first.description
+        assert second.end_time is None
+        assert second.activity_group_id == first.id
+        # First entry has no activity_group_id (it is the group root)
+        assert getattr(first, "activity_group_id", None) is None
+
+    def test_continue_time_entry_chain_shares_same_group(self, db_user1: DatabaseManager):
+        """Continue from a continued entry: all share activity_group_id of the first."""
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        db_user1.start_timer(project.id, "Task")
+        e1 = db_user1.stop_timer()
+        e2 = db_user1.continue_time_entry(e1.id)
+        db_user1.stop_timer()
+        e3 = db_user1.continue_time_entry(e2.id)
+        assert e2.activity_group_id == e1.id
+        assert e3.activity_group_id == e1.id
+
+    def test_continue_time_entry_invalid_id_raises(self, db_user1: DatabaseManager):
+        """continue_time_entry with non-existent or other user's entry raises."""
+        with pytest.raises(ValueError, match="not found"):
+            db_user1.continue_time_entry(99999)
+
+
 # --- backup / restore ---
 
 

@@ -132,6 +132,11 @@ class DatabaseManager:
                 if "hourly_rate_euro" not in matter_cols:
                     conn.execute(text("ALTER TABLE matters ADD COLUMN hourly_rate_euro REAL"))
                     conn.commit()
+            if "time_entries" in insp.get_table_names():
+                te_cols = [c["name"] for c in insp.get_columns("time_entries")]
+                if "activity_group_id" not in te_cols:
+                    conn.execute(text("ALTER TABLE time_entries ADD COLUMN activity_group_id INTEGER REFERENCES time_entries(id)"))
+                    conn.commit()
         if self._engine.dialect.name == "postgresql":
             self._init_postgres_rls()
 
@@ -511,6 +516,33 @@ class DatabaseManager:
                 .first()
             )
 
+    def continue_time_entry(self, entry_id: int) -> TimeEntry:
+        """
+        Create a new time entry (running) with same matter, description, and owner as the given entry.
+        The new entry is linked to the same activity group so timesheet can aggregate duration.
+        Raises ValueError if entry not found or not owned by current user.
+        """
+        self._require_user()
+        with self._session() as session:
+            entry = self._time_entry_query(session).filter(TimeEntry.id == entry_id).first()
+            if entry is None:
+                raise ValueError("Time entry not found.")
+            group_id = entry.activity_group_id if entry.activity_group_id is not None else entry.id
+            new_entry = TimeEntry(
+                owner_id=entry.owner_id,
+                matter_id=entry.matter_id,
+                description=entry.description or "",
+                start_time=datetime.now(),
+                end_time=None,
+                duration_seconds=0.0,
+                invoiced=False,
+                activity_group_id=group_id,
+            )
+            session.add(new_entry)
+            session.commit()
+            session.refresh(new_entry)
+            return new_entry
+
     def update_running_entry_start_time(self, new_start: datetime) -> TimeEntry | None:
         """Update the current running entry's start_time. Returns the entry or None."""
         self._require_user()
@@ -658,6 +690,7 @@ class DatabaseManager:
                     "invoiced": bool(e.invoiced),
                     "amount_eur": amount_eur,
                     "rate_source": rate_source,
+                    "activity_group_id": getattr(e, "activity_group_id", None),
                 }
                 if export_all_users or admin:
                     item["owner_id"] = e.owner_id
@@ -737,6 +770,7 @@ class DatabaseManager:
                     "end_time": e.end_time.isoformat() if e.end_time else None,
                     "duration_seconds": e.duration_seconds if e.duration_seconds is not None else 0.0,
                     "invoiced": bool(e.invoiced),
+                    "activity_group_id": getattr(e, "activity_group_id", None),
                 }
                 for e in entries
             ],
@@ -800,6 +834,7 @@ class DatabaseManager:
                         end_time=end_time,
                         duration_seconds=float(row.get("duration_seconds", 0) or 0),
                         invoiced=bool(row.get("invoiced", False)),
+                        activity_group_id=row.get("activity_group_id"),
                     )
                 )
             session.commit()

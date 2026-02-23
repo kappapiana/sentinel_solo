@@ -48,5 +48,7 @@ class TimeEntry(Base):
     end_time = Column(DateTime, nullable=True)
     duration_seconds = Column(Float, default=0.0)
     invoiced = Column(Boolean, default=False, nullable=False)
+    # Link segments of the same logical activity (Continue task): first segment has None, continued segments point to first entry id
+    activity_group_id = Column(Integer, ForeignKey("time_entries.id"), nullable=True)
     owner = relationship("User", back_populates="time_entries")
     matter = relationship("Matter", back_populates="time_entries")
