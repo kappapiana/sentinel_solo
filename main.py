@@ -293,12 +293,40 @@ class SentinelApp:
 
         body = ft.Container(ref=self.body_ref, content=timer_container, expand=True)
 
+        async def _do_logout(_):
+            await page.shared_preferences.set(STORAGE_USER_ID, "")
+            await page.shared_preferences.set(STORAGE_USERNAME, "")
+            if logout_callback:
+                logout_callback()
+
+        def _on_logout_click(e):
+            page.run_task(_do_logout, e)
+
+        top_bar = ft.Row(
+            [
+                ft.Text(f"Logged in as {current_username}", size=14, color=ft.Colors.ON_SURFACE_VARIANT),
+                ft.IconButton(
+                    icon=ft.Icons.LOGOUT,
+                    tooltip="Log out",
+                    on_click=_on_logout_click,
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.END,
+            tight=True,
+        )
+
         page.add(
-            ft.Row(
+            ft.Column(
                 [
-                    rail,
-                    ft.VerticalDivider(width=1),
-                    body,
+                    top_bar,
+                    ft.Row(
+                        [
+                            rail,
+                            ft.VerticalDivider(width=1),
+                            body,
+                        ],
+                        expand=True,
+                    ),
                 ],
                 expand=True,
             )
@@ -2899,10 +2927,19 @@ def _build_create_first_admin_view(
 
     password_field.on_submit = _do_create
     create_btn = ft.ElevatedButton("Create admin", on_click=_do_create)
+    backend_hint = ft.Text(
+        f"Backend: {login_db.backend_description()}",
+        size=12,
+        color=ft.Colors.ON_SURFACE_VARIANT,
+    )
+    if login_db.backend_description() == "SQLite (local)":
+        backend_hint.tooltip = "If you installed with --postgres, start the app from the launcher (sentinel-solo) so config.env is loaded."
     return ft.Column(
         [
             ft.Text("Sentinel Solo", size=28, weight=ft.FontWeight.BOLD),
             ft.Container(height=8),
+            backend_hint,
+            ft.Container(height=4),
             ft.Text("No users yet. Create the first admin account.", size=14),
             ft.Container(height=24),
             username_field,

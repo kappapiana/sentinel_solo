@@ -127,25 +127,27 @@ fi
 "$DEST_DIR/venv/bin/pip" install -q --upgrade pip
 "$DEST_DIR/venv/bin/pip" install -q -r "$DEST_DIR/requirements.txt"
 
-# Optional: write PostgreSQL config so launcher can export DATABASE_URL
+# Optional: write PostgreSQL config so launcher can export DATABASE_URL (shell-quoted so special chars are safe)
 if [[ -n "$DATABASE_URL" ]]; then
     echo "Configuring PostgreSQL backend..."
-    echo "DATABASE_URL=$DATABASE_URL" > "$DEST_DIR/config.env"
+    printf 'DATABASE_URL=%q\n' "$DATABASE_URL" > "$DEST_DIR/config.env"
     chmod 600 "$DEST_DIR/config.env"
     echo "  Wrote $DEST_DIR/config.env (DATABASE_URL). Ensure the database and user exist; first run will create tables."
 fi
 
-# Launcher script (DEST_DIR is expanded). Sources config.env if present to set DATABASE_URL.
+# Launcher script (DEST_DIR is expanded). Sources config.env if present so DATABASE_URL is set for the app.
 LAUNCHER="$BIN_DIR/$APP_NAME"
 cat > "$LAUNCHER" << LAUNCHER_END
 #!/usr/bin/env bash
 # Launcher for Sentinel Solo (installed)
 export XCURSOR_THEME="\${XCURSOR_THEME:-Adwaita}"
 export XCURSOR_SIZE="\${XCURSOR_SIZE:-24}"
-if [[ -r "$DEST_DIR/config.env" ]]; then
+CONFIG_ENV="$DEST_DIR/config.env"
+if [[ -r "\$CONFIG_ENV" ]]; then
     set -a
-    source "$DEST_DIR/config.env"
+    . "\$CONFIG_ENV"
     set +a
+    [[ -n "\$DATABASE_URL" ]] && export DATABASE_URL
 fi
 exec "$DEST_DIR/venv/bin/python" "$DEST_DIR/main.py" "\$@"
 LAUNCHER_END

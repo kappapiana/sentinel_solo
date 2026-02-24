@@ -73,6 +73,15 @@ python main.py
 
 Create the database and tables on the server first (run the app once with that URL, or run `Base.metadata.create_all` against the engine). Use SSL and strong credentials in production; ensure the host allows connections from your clients (e.g. firewall, VPN).
 
+**PostgreSQL: login after log out**  
+With RLS enabled, the app’s login helpers (`has_any_user`, `get_login_credentials`) must run with elevated privileges so the login screen and “Log in” work when no user is logged in. Run this **once** as a superuser (e.g. `postgres`) on your database:
+
+```bash
+psql -U postgres -d YOUR_DATABASE -f scripts/postgres_bootstrap_login.sql
+```
+
+Replace `YOUR_DATABASE` with your DB name (e.g. `timesheets`). After that, “Log out” will show the normal login form and you can sign in as another user.
+
 **Cross-platform and Android**  
 Flet runs on Windows, macOS, Linux, web, and mobile. To build an Android APK, use Flet’s build tools (see [Flet docs](https://flet.dev/docs/)); install Android SDK/NDK as required and run the APK build command. The same codebase runs on desktop and mobile.
 
@@ -97,6 +106,7 @@ Fixtures in `tests/conftest.py` use a temporary SQLite database and two users (a
 - **run.sh** – Linux launcher: runs the app with the project venv and optional cursor theme env vars.
 - **install.sh** – Linux installer: installs app under `~/.local` (or `--prefix`), creates venv, adds `sentinel-solo` launcher and desktop menu entry. Options `--postgres` (interactive prompt; password not on CLI) or `--database-url-file FILE` configure PostgreSQL (writes `config.env`; launcher exports `DATABASE_URL`).
 - **uninstall.sh** – Linux uninstaller: removes the installed app dir, launcher, and desktop entry (use same `--prefix` as for install).
+- **scripts/postgres_bootstrap_login.sql** – Run once as a PostgreSQL superuser so login and “Log out” work correctly with RLS (see **PostgreSQL: login after log out** above).
 - **tests/** – Pytest suite: `test_database_manager.py` (hierarchy, full paths, owner filtering, reporting aggregation, hourly rate resolution, continue_time_entry, delete_time_entry, backup/restore), `test_regression.py` (user/matter creation, path recursion, RLS, timer duration); see **Tests** above.
 
 ## User administration and admin user

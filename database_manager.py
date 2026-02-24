@@ -47,6 +47,12 @@ class DatabaseManager:
         """Current user id for this manager (read-only)."""
         return self._current_user_id
 
+    def backend_description(self) -> str:
+        """Short description of the backend for UI (e.g. 'SQLite (local)' or 'PostgreSQL')."""
+        if self._engine.dialect.name == "postgresql":
+            return "PostgreSQL"
+        return "SQLite (local)"
+
     def _setup_postgres_pool_checkout(self) -> None:
         """Register pool checkout to set app.current_user_id (called from __init__ when Postgres)."""
         if self._engine.dialect.name != "postgresql" or self._current_user_id is None:
@@ -141,66 +147,82 @@ class DatabaseManager:
             self._init_postgres_rls()
 
     def _init_postgres_rls(self) -> None:
-        """Enable RLS on matters, time_entries, users and create SECURITY DEFINER functions."""
+        """Enable RLS on matters, time_entries, users and create SECURITY DEFINER functions.
+        For login to work when no user is logged in (e.g. after Log out), run
+        scripts/postgres_bootstrap_login.sql once as a PostgreSQL superuser."""
         with self._engine.connect() as conn:
             conn.execute(text("CREATE SCHEMA IF NOT EXISTS app"))
-            conn.execute(
-                text(
-                    """
-                    CREATE OR REPLACE FUNCTION app.current_user_is_admin()
-                    RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
-                    AS $$
-                    SELECT COALESCE(
-                        (SELECT is_admin FROM public.users WHERE id::text = current_setting('app.current_user_id', true)),
-                        false
+            # Only (re)create SECURITY DEFINER helper functions when running as a superuser.
+            # This avoids overwriting functions that were bootstrapped by a superuser and
+            # must bypass RLS for unauthenticated login flows.
+            is_superuser = True
+            try:
+                row = conn.execute(
+                    text("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+                ).fetchone()
+                is_superuser = bool(row and row[0])
+            except Exception:
+                # If this check fails for any reason, default to True so initial setup still works.
+                is_superuser = True
+
+            if is_superuser:
+                conn.execute(
+                    text(
+                        """
+                        CREATE OR REPLACE FUNCTION app.current_user_is_admin()
+                        RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
+                        AS $$
+                        SELECT COALESCE(
+                            (SELECT is_admin FROM public.users WHERE id::text = current_setting('app.current_user_id', true)),
+                            false
+                        )
+                        $$
+                        """
                     )
-                    $$
-                    """
                 )
-            )
-            conn.execute(
-                text(
-                    """
-                    CREATE OR REPLACE FUNCTION app.get_login_credentials(p_username text)
-                    RETURNS table(id int, password_hash text) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
-                    AS $$
-                    SELECT u.id, u.password_hash FROM public.users u WHERE u.username = p_username
-                    $$
-                    """
+                conn.execute(
+                    text(
+                        """
+                        CREATE OR REPLACE FUNCTION app.get_login_credentials(p_username text)
+                        RETURNS table(id int, password_hash text) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
+                        AS $$
+                        SELECT u.id, u.password_hash FROM public.users u WHERE u.username = p_username
+                        $$
+                        """
+                    )
                 )
-            )
-            conn.execute(
-                text(
-                    """
-                    CREATE OR REPLACE FUNCTION app.has_any_user()
-                    RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
-                    AS $$
-                    SELECT (SELECT count(*) FROM public.users) > 0
-                    $$
-                    """
+                conn.execute(
+                    text(
+                        """
+                        CREATE OR REPLACE FUNCTION app.has_any_user()
+                        RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
+                        AS $$
+                        SELECT (SELECT count(*) FROM public.users) > 0
+                        $$
+                        """
+                    )
                 )
-            )
-            conn.execute(
-                text(
-                    """
-                    CREATE OR REPLACE FUNCTION app.create_first_admin(p_username text, p_password_hash text)
-                    RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
-                    AS $$
-                    DECLARE
-                        new_id int;
-                    BEGIN
-                        IF (SELECT count(*) FROM public.users) > 0 THEN
-                            RETURN NULL;
-                        END IF;
-                        INSERT INTO public.users (username, password_hash, is_admin)
-                        VALUES (p_username, p_password_hash, true)
-                        RETURNING id INTO new_id;
-                        RETURN new_id;
-                    END
-                    $$
-                    """
+                conn.execute(
+                    text(
+                        """
+                        CREATE OR REPLACE FUNCTION app.create_first_admin(p_username text, p_password_hash text)
+                        RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+                        AS $$
+                        DECLARE
+                            new_id int;
+                        BEGIN
+                            IF (SELECT count(*) FROM public.users) > 0 THEN
+                                RETURN NULL;
+                            END IF;
+                            INSERT INTO public.users (username, password_hash, is_admin)
+                            VALUES (p_username, p_password_hash, true)
+                            RETURNING id INTO new_id;
+                            RETURN new_id;
+                        END
+                        $$
+                        """
+                    )
                 )
-            )
             for table in ("matters", "time_entries", "users"):
                 conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
                 conn.execute(text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY"))
