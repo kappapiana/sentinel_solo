@@ -1291,12 +1291,56 @@ class DatabaseManager:
     def get_user(self, user_id: int) -> User | None:
         """Return User by id (current user can read self; admin can read any)."""
         self._require_user()
+        if self._engine.dialect.name == "postgresql":
+            with self._session() as session:
+                row = session.execute(
+                    text("SELECT id, username, password_hash, is_admin, default_hourly_rate_euro FROM app.get_user(:caller_id, :user_id)"),
+                    {"caller_id": self._current_user_id, "user_id": user_id},
+                ).fetchone()
+                if not row:
+                    return None
+                return User(
+                    id=row[0],
+                    username=row[1],
+                    password_hash=row[2],
+                    is_admin=row[3],
+                    default_hourly_rate_euro=row[4],
+                )
         with self._session() as session:
             return session.query(User).filter(User.id == user_id).first()
+
+    def get_current_user_is_admin(self) -> bool:
+        """Return whether the current user is admin. On Postgres uses SECURITY DEFINER so it works regardless of RLS."""
+        self._require_user()
+        if self._engine.dialect.name == "postgresql":
+            with self._session() as session:
+                row = session.execute(
+                    text("SELECT app.get_user_is_admin(:id)"),
+                    {"id": self._current_user_id},
+                ).fetchone()
+                return bool(row and row[0])
+        user = self.get_user(self._current_user_id)
+        return bool(user and user.is_admin)
 
     def list_users(self) -> list[User]:
         """List all users (admin only on Postgres via RLS; SQLite: check is_admin in app)."""
         self._require_user()
+        if self._engine.dialect.name == "postgresql":
+            with self._session() as session:
+                rows = session.execute(
+                    text("SELECT id, username, password_hash, is_admin, default_hourly_rate_euro FROM app.list_users(:id)"),
+                    {"id": self._current_user_id},
+                ).fetchall()
+                return [
+                    User(
+                        id=r[0],
+                        username=r[1],
+                        password_hash=r[2],
+                        is_admin=r[3],
+                        default_hourly_rate_euro=r[4],
+                    )
+                    for r in rows
+                ]
         with self._session() as session:
             return list(session.query(User).order_by(User.username).all())
 
@@ -1309,15 +1353,35 @@ class DatabaseManager:
     ) -> User:
         """Create a new user (admin only)."""
         self._require_user()
-        with self._session() as session:
-            if self._engine.dialect.name == "sqlite":
-                admin = (
-                    session.query(User)
-                    .filter(User.id == self._current_user_id, User.is_admin == True)
-                    .first()
-                )
-                if not admin:
+        if self._engine.dialect.name == "postgresql":
+            with self._session() as session:
+                row = session.execute(
+                    text("SELECT app.create_user(:caller_id, :username, :pw_hash, :is_admin)"),
+                    {
+                        "caller_id": self._current_user_id,
+                        "username": username,
+                        "pw_hash": password_hash,
+                        "is_admin": is_admin,
+                    },
+                ).fetchone()
+                if not row or row[0] is None:
                     raise ValueError("Only admin can create users.")
+                session.commit()
+                new_id = int(row[0])
+                return User(
+                    id=new_id,
+                    username=username,
+                    password_hash=password_hash,
+                    is_admin=is_admin,
+                )
+        with self._session() as session:
+            admin = (
+                session.query(User)
+                .filter(User.id == self._current_user_id, User.is_admin == True)
+                .first()
+            )
+            if not admin:
+                raise ValueError("Only admin can create users.")
             user = User(
                 username=username,
                 password_hash=password_hash,
@@ -1339,6 +1403,22 @@ class DatabaseManager:
     ) -> None:
         """Update user (own row for non-admin; any row for admin). Pass None for default_hourly_rate_euro to clear."""
         self._require_user()
+        if self._engine.dialect.name == "postgresql":
+            with self._session() as session:
+                session.execute(
+                    text("SELECT app.update_user(:caller_id, :user_id, :username, :pw_hash, :is_admin, :rate, :clear_rate)"),
+                    {
+                        "caller_id": self._current_user_id,
+                        "user_id": user_id,
+                        "username": username,
+                        "pw_hash": password_hash,
+                        "is_admin": is_admin,
+                        "rate": default_hourly_rate_euro if default_hourly_rate_euro is not _UNSET else None,
+                        "clear_rate": default_hourly_rate_euro is None,  # None means clear
+                    },
+                )
+                session.commit()
+            return
         with self._session() as session:
             user = session.query(User).filter(User.id == user_id).first()
             if user is None:
@@ -1368,6 +1448,14 @@ class DatabaseManager:
     def delete_user(self, user_id: int) -> None:
         """Delete a user (admin only)."""
         self._require_user()
+        if self._engine.dialect.name == "postgresql":
+            with self._session() as session:
+                session.execute(
+                    text("SELECT app.delete_user(:caller_id, :user_id)"),
+                    {"caller_id": self._current_user_id, "user_id": user_id},
+                )
+                session.commit()
+            return
         with self._session() as session:
             if self._engine.dialect.name == "sqlite":
                 admin = (

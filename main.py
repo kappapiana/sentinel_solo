@@ -3040,8 +3040,7 @@ async def main(page: ft.Page) -> None:
         await page.shared_preferences.set(STORAGE_USERNAME, username)
         page.controls.clear()
         user_db = DatabaseManager(current_user_id=user_id)
-        current_user = user_db.get_user(user_id)
-        is_admin = current_user.is_admin if current_user else False
+        is_admin = user_db.get_current_user_is_admin()
         app = SentinelApp(page, user_db)
         app.setup(
             logout_callback=show_login,

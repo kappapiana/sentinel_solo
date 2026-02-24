@@ -1,6 +1,11 @@
 """
 Pytest suite for database_manager.py.
-Focus: hierarchical matter creation, get_full_path accuracy, RLS-style owner filtering.
+Focus: hierarchical matter creation, get_full_path accuracy, RLS-style owner filtering,
+user admin (create/list/get/update/delete), backup/restore, require-user checks.
+
+All tests use SQLite (conftest). PostgreSQL behaviour (RLS + app schema functions)
+is exercised by the same code paths when DATABASE_URL points at a Postgres DB
+that has been bootstrapped with scripts/postgres_bootstrap_login.sql.
 """
 from datetime import date, datetime, timedelta
 

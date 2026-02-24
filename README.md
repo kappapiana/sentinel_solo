@@ -73,14 +73,18 @@ python main.py
 
 Create the database and tables on the server first (run the app once with that URL, or run `Base.metadata.create_all` against the engine). Use SSL and strong credentials in production; ensure the host allows connections from your clients (e.g. firewall, VPN).
 
-**PostgreSQL: login after log out**  
-With RLS enabled, the app’s login helpers (`has_any_user`, `get_login_credentials`) must run with elevated privileges so the login screen and “Log in” work when no user is logged in. Run this **once** as a superuser (e.g. `postgres`) on your database:
+**PostgreSQL: bootstrap script (required)**  
+With RLS enabled, the app uses SECURITY DEFINER functions in the `app` schema so that login, first-admin creation, the Users tab, and add/edit/delete user all work. Run this **once** as a PostgreSQL superuser (e.g. `postgres`) on your database:
 
 ```bash
 psql -U postgres -d YOUR_DATABASE -f scripts/postgres_bootstrap_login.sql
 ```
 
-Replace `YOUR_DATABASE` with your DB name (e.g. `timesheets`). After that, “Log out” will show the normal login form and you can sign in as another user.
+Replace `YOUR_DATABASE` with your DB name (e.g. `timesheets`). You can run it from the server (e.g. `sudo -u postgres psql -d timesheets -f /path/to/scripts/postgres_bootstrap_login.sql`) or from another host if the superuser can connect. The script creates: login helpers (`has_any_user`, `get_login_credentials`, `create_first_admin`), admin check (`get_user_is_admin`), and user admin helpers (`list_users`, `get_user`, `create_user`, `update_user`, `delete_user`). After that:
+
+- “Log out” shows the normal login form and you can sign in as another user.
+- The **Users** tab shows for admin and lists all users.
+- Add user, Edit user, and Delete user work for admins.
 
 **Cross-platform and Android**  
 Flet runs on Windows, macOS, Linux, web, and mobile. To build an Android APK, use Flet’s build tools (see [Flet docs](https://flet.dev/docs/)); install Android SDK/NDK as required and run the APK build command. The same codebase runs on desktop and mobile.
@@ -93,10 +97,10 @@ From the project root (with venv activated):
 pytest tests/ -v
 ```
 
-- **tests/test_database_manager.py** – Hierarchical matter creation, `get_full_path` accuracy, per-owner matter code suggestion, RLS-style filtering (each user sees only their own matters and time entries), admin include-all-users and export, reporting aggregation (time by client/matter with total vs not invoiced, plus chargeable amounts and rate source), **hourly rate resolution** (matter > client > user, `add_matter` with optional `hourly_rate_euro`, `update_matter` / `update_user` rate fields, `amount_eur_from_seconds`), **continue_time_entry** (activity group chaining), **delete_time_entry** (remove entry, owner-scoped), backup/restore (export/import full database), and require-user checks.
+- **tests/test_database_manager.py** – Hierarchical matter creation, `get_full_path` accuracy, per-owner matter code suggestion, RLS-style filtering (each user sees only their own matters and time entries), admin include-all-users and export, reporting aggregation (time by client/matter with total vs not invoiced, plus chargeable amounts and rate source), **hourly rate resolution** (matter > client > user, `add_matter` with optional `hourly_rate_euro`, `update_matter` / `update_user` rate fields, `amount_eur_from_seconds`), **continue_time_entry** (activity group chaining), **delete_time_entry** (remove entry, owner-scoped), **user admin** (create/list/get/update/delete user, backup/restore), and require-user checks.
 - **tests/test_regression.py** – User and matter creation, `get_full_path` recursion (multi-level hierarchy), privacy/RLS (one user cannot see another’s matters), and timer start/stop with correct duration calculation.
 
-Fixtures in `tests/conftest.py` use a temporary SQLite database and two users (admin + normal).
+Fixtures in `tests/conftest.py` use a temporary SQLite database and two users (admin + normal). The suite does not run against PostgreSQL; PostgreSQL-specific behaviour (RLS and the bootstrap script) is covered by the same logic paths but must be verified with a real Postgres database after running the bootstrap script.
 
 ## Project layout
 
@@ -106,8 +110,8 @@ Fixtures in `tests/conftest.py` use a temporary SQLite database and two users (a
 - **run.sh** – Linux launcher: runs the app with the project venv and optional cursor theme env vars.
 - **install.sh** – Linux installer: installs app under `~/.local` (or `--prefix`), creates venv, adds `sentinel-solo` launcher and desktop menu entry. Options `--postgres` (interactive prompt; password not on CLI) or `--database-url-file FILE` configure PostgreSQL (writes `config.env`; launcher exports `DATABASE_URL`).
 - **uninstall.sh** – Linux uninstaller: removes the installed app dir, launcher, and desktop entry (use same `--prefix` as for install).
-- **scripts/postgres_bootstrap_login.sql** – Run once as a PostgreSQL superuser so login and “Log out” work correctly with RLS (see **PostgreSQL: login after log out** above).
-- **tests/** – Pytest suite: `test_database_manager.py` (hierarchy, full paths, owner filtering, reporting aggregation, hourly rate resolution, continue_time_entry, delete_time_entry, backup/restore), `test_regression.py` (user/matter creation, path recursion, RLS, timer duration); see **Tests** above.
+- **scripts/postgres_bootstrap_login.sql** – Run once as a PostgreSQL superuser so login, first admin, Users tab, and add/edit/delete user work with RLS (see **PostgreSQL: bootstrap script** above).
+- **tests/** – Pytest suite: `test_database_manager.py` (hierarchy, full paths, owner filtering, reporting, hourly rates, continue/delete time entry, user admin, backup/restore), `test_regression.py` (user/matter creation, path recursion, RLS, timer duration); see **Tests** above.
 
 ## User administration and admin user
 
