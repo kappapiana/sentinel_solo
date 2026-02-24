@@ -47,7 +47,7 @@ Every matter and submatter has an **effective hourly rate** used to compute char
 
    On Linux you can use **run.sh**: it runs the app with the project venv (and creates the venv if missing; the script will prompt you to run `python3 -m venv venv && ./venv/bin/pip install -r requirements.txt`).
 
-   **Linux installer (optional):** run `./install.sh` to install under `~/.local` (venv, launcher `sentinel-solo`, and a desktop menu entry). Use `./install.sh --prefix /usr/local` for a system-wide install (may require sudo for directory creation). To remove: `./uninstall.sh` (or `./uninstall.sh --prefix /usr/local` if you installed system-wide).
+   **Linux installer (optional):** run `./install.sh` to install under `~/.local` (venv, launcher `sentinel-solo`, and a desktop menu entry). Use `./install.sh --prefix /usr/local` for a system-wide install (may require sudo for directory creation). To use PostgreSQL as the backend, run `./install.sh --postgres` and enter connection details at the prompt (password is not echoed and never appears on the command line), or use `./install.sh --database-url-file /path/to/file` where the file contains the connection string (e.g. `chmod 600` that file). The launcher then sets `DATABASE_URL` from the install dir’s `config.env`. To remove: `./uninstall.sh` (or `./uninstall.sh --prefix /usr/local` if you installed system-wide).
 
 3. **Install dependencies**
    ```bash
@@ -63,8 +63,8 @@ Every matter and submatter has an **effective hourly rate** used to compute char
 
 The first run creates a SQLite database (`sentinel.db`) in the project directory. If no users exist, the app shows a **Create first admin** form so you can choose username and password for the initial admin (see below).
 
-**Optional: remote PostgreSQL**  
-To use a shared remote database (e.g. for multiple devices or Android), set the **`DATABASE_URL`** environment variable to a PostgreSQL connection string before starting the app:
+**Optional: PostgreSQL backend**
+To use a shared PostgreSQL database (e.g. for multiple devices or Android), either configure it at install time with `./install.sh --postgres` (interactive; no password on the command line) or `./install.sh --database-url-file /path/to/file` (see above), or set the **`DATABASE_URL`** environment variable to a PostgreSQL connection string before starting the app:
 
 ```bash
 export DATABASE_URL="postgresql+psycopg2://user:password@host:5432/dbname"
@@ -95,7 +95,7 @@ Fixtures in `tests/conftest.py` use a temporary SQLite database and two users (a
 - **database_manager.py** – DB access: matters (incl. `hourly_rate_euro`), time entries, rate resolution, move/merge, get/update/add time entries and matters, get time for day, timesheet export (with amount_eur and rate_source), reporting with amounts.
 - **models.py** – SQLAlchemy models: `User` (incl. `default_hourly_rate_euro`), `Matter` (tree via `parent_id`, `hourly_rate_euro`), `TimeEntry` (linked to matter).
 - **run.sh** – Linux launcher: runs the app with the project venv and optional cursor theme env vars.
-- **install.sh** – Linux installer: installs app under `~/.local` (or `--prefix`), creates venv, adds `sentinel-solo` launcher and desktop menu entry.
+- **install.sh** – Linux installer: installs app under `~/.local` (or `--prefix`), creates venv, adds `sentinel-solo` launcher and desktop menu entry. Options `--postgres` (interactive prompt; password not on CLI) or `--database-url-file FILE` configure PostgreSQL (writes `config.env`; launcher exports `DATABASE_URL`).
 - **uninstall.sh** – Linux uninstaller: removes the installed app dir, launcher, and desktop entry (use same `--prefix` as for install).
 - **tests/** – Pytest suite: `test_database_manager.py` (hierarchy, full paths, owner filtering, reporting aggregation, hourly rate resolution, continue_time_entry, delete_time_entry, backup/restore), `test_regression.py` (user/matter creation, path recursion, RLS, timer duration); see **Tests** above.
 

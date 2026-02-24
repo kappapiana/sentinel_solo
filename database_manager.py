@@ -307,6 +307,20 @@ class DatabaseManager:
                     """
                 )
             )
+            # Allow first user: WITH CHECK runs after the new row is visible, so count can be 1.
+            # Only allow when no session user is set (unauthenticated = first-admin flow).
+            conn.execute(
+                text(
+                    """
+                    DROP POLICY IF EXISTS users_insert_first ON users;
+                    CREATE POLICY users_insert_first ON users FOR INSERT
+                    WITH CHECK (
+                        (current_setting('app.current_user_id', true) IS NULL OR current_setting('app.current_user_id', true) = '')
+                        AND (SELECT count(*) FROM public.users) <= 1
+                    )
+                    """
+                )
+            )
             conn.execute(
                 text(
                     """
