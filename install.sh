@@ -98,7 +98,7 @@ if [[ -n "$USE_POSTGRES_INTERACTIVE" ]]; then
         exit 1
     fi
     # URL-encode password so special characters don't break the URL (pass via stdin to avoid exposure in process list)
-    if ! pg_pass_encoded="$(printf '%s' "$pg_pass" | "$PYTHON" -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=\"\"))')"; then
+    if ! pg_pass_encoded="$(printf '%s' "$pg_pass" | "$PYTHON" -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))')"; then
         echo "Error: failed to URL-encode PostgreSQL password using $PYTHON. Please ensure Python 3 is installed." >&2
         exit 1
     fi
@@ -131,7 +131,7 @@ elif [[ -n "$POSTGRES_PARAMS_FILE" ]]; then
         echo "Error: PGUSER and PGDATABASE are required in $POSTGRES_PARAMS_FILE." >&2
         exit 1
     fi
-    if ! pg_pass_encoded="$(printf '%s' "$pg_pass" | "$PYTHON" -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=\"\"))')"; then
+    if ! pg_pass_encoded="$(printf '%s' "$pg_pass" | "$PYTHON" -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))')"; then
         echo "Error: failed to URL-encode PostgreSQL password using $PYTHON. Please ensure Python 3 is installed." >&2
         exit 1
     fi
