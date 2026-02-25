@@ -350,6 +350,10 @@ class SentinelApp:
                 refresh()
             start_time_ref[0] = new_entry.start_time
             running_ref[0] = True
+            # Force timer mode so Start/Stop and timer box are visible when continuing.
+            set_mode = (page.data or {}).get("_timer_set_mode_callback")
+            if callable(set_mode):
+                set_mode(False)
             if timer_label.current:
                 timer_label.current.value = "00:00:00"
             start_time_section_ref = (page.data or {}).get("_timer_start_time_section_ref")
@@ -701,7 +705,6 @@ class SentinelApp:
         manual_end_ref = ft.Ref[ft.TextField]()
         manual_duration_ref = ft.Ref[ft.TextField]()
         manual_derived_ref = ft.Ref[ft.Text]()
-        timer_mode_ref = ft.Ref[ft.SegmentedButton]()
         timer_section_ref = ft.Ref[ft.Container]()
         manual_section_ref = ft.Ref[ft.Container]()
         start_time_field_ref = ft.Ref[ft.TextField]()
@@ -719,6 +722,8 @@ class SentinelApp:
         )
         start_btn = ft.ElevatedButton("Start", icon=ft.Icons.PLAY_ARROW)
         stop_btn = ft.OutlinedButton("Stop", icon=ft.Icons.STOP)
+        manual_mode: list[bool] = [False]
+        manual_btn_ref = ft.Ref[ft.ElevatedButton]()
 
         async def timer_loop():
             while running_ref[0] and start_time_ref[0]:
@@ -856,13 +861,31 @@ class SentinelApp:
         start_btn.on_click = on_start
         stop_btn.on_click = on_stop
 
-        def on_timer_mode_change(e):
-            selected = (e.control.selected or ["timer"])[0] if e.control.selected else "timer"
+        def _set_mode(manual: bool):
+            manual_mode[0] = manual
             if timer_section_ref.current:
-                timer_section_ref.current.visible = selected == "timer"
+                timer_section_ref.current.visible = not manual
             if manual_section_ref.current:
-                manual_section_ref.current.visible = selected == "manual"
+                manual_section_ref.current.visible = manual
+            if manual_btn_ref.current:
+                manual_btn_ref.current.icon = (
+                    ft.Icons.CHECK if manual_mode[0] else ft.Icons.EDIT_NOTE
+                )
+                # Use a neutral gray background when selected; avoid enum values
+                manual_btn_ref.current.style = (
+                    ft.ButtonStyle(
+                        bgcolor={ft.ControlState.DEFAULT: "#444444"}
+                    )
+                    if manual_mode[0]
+                    else None
+                )
             page.update()
+
+        # Expose mode setter so other callbacks (e.g. Continue task) can force timer mode.
+        (page.data or {})["_timer_set_mode_callback"] = _set_mode
+
+        def _on_manual_toggle(_):
+            _set_mode(not manual_mode[0])
 
         timer_matter_list_initial = _build_timer_matter_list("")
         matter_block = ft.Container(
@@ -928,8 +951,6 @@ class SentinelApp:
                     label,
                     ft.Container(height=12),
                     start_time_row,
-                    ft.Container(height=24),
-                    ft.Row([start_btn, stop_btn], spacing=12),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
@@ -955,6 +976,13 @@ class SentinelApp:
             visible=False,
         )
 
+        manual_btn = ft.ElevatedButton(
+            "Manual entry",
+            icon=ft.Icons.EDIT_NOTE,
+            ref=manual_btn_ref,
+            on_click=_on_manual_toggle,
+        )
+
         timer_controls = [
             ft.Text("Timer", size=24, weight=ft.FontWeight.BOLD),
             ft.Container(height=8),
@@ -968,21 +996,18 @@ class SentinelApp:
         timer_controls.extend([
             matter_block,
             ft.Container(height=8),
-            ft.Text("How do you want to log time?", size=14),
-            ft.Container(height=4),
-            ft.SegmentedButton(
-                ref=timer_mode_ref,
-                segments=[
-                    ft.Segment(value="timer", label=ft.Text("Timer")),
-                    ft.Segment(value="manual", label=ft.Text("Manual entry")),
-                ],
-                selected=["timer"],
-                on_change=on_timer_mode_change,
+            ft.Row(
+                [start_btn, stop_btn, manual_btn],
+                spacing=12,
+                alignment=ft.MainAxisAlignment.CENTER,
             ),
             ft.Container(height=8),
             timer_section,
             manual_section,
         ])
+
+        # Ensure initial mode is timer (manual off).
+        _set_mode(False)
 
         return ft.Column(
             timer_controls,
