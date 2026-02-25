@@ -18,20 +18,28 @@ APPS_DIR="$PREFIX/share/applications"
 SRC_DIR="${SRC_DIR:-$SCRIPT_DIR}"
 PYTHON="${PYTHON3:-python3}"
 
-# PostgreSQL: set by --postgres (interactive) or --database-url-file FILE. Written to DEST_DIR/config.env.
+# PostgreSQL: set by --postgres (interactive), --postgres-params-file FILE, or --database-url-file FILE.
+# Written to DEST_DIR/config.env.
 DATABASE_URL=""
 DATABASE_URL_FILE=""
 USE_POSTGRES_INTERACTIVE=""
+POSTGRES_PARAMS_FILE=""
 
 usage() {
     echo "Usage: $0 [OPTIONS]"
     echo "  Install Sentinel Solo under \$PREFIX (default: \$HOME/.local)."
     echo ""
     echo "Options:"
-    echo "  --prefix DIR           Install to DIR (e.g. /usr/local for system-wide; may need sudo)."
-    echo "  --postgres             Configure PostgreSQL interactively (prompts for host, user, db, password; no secret on CLI)."
-    echo "  --database-url-file F  Read PostgreSQL URL from file F (e.g. a chmod 600 file); no secret on CLI."
-    echo "  --help                 Show this help."
+    echo "  --prefix DIR              Install to DIR (e.g. /usr/local for system-wide; may need sudo)."
+    echo "  --postgres                Configure PostgreSQL interactively (prompts for host, user, db, password; no secret on CLI)."
+    echo "  --postgres-params-file F  Read host/port/user/db (NO password) from file F; still prompts password."
+    echo "                            File format (shell vars, no secrets):"
+    echo "                              PGHOST=host"
+    echo "                              PGPORT=5432"
+    echo "                              PGUSER=user"
+    echo "                              PGDATABASE=timesheets"
+    echo "  --database-url-file F     Read PostgreSQL URL from file F (e.g. a chmod 600 file); no secret on CLI but includes password."
+    echo "  --help                    Show this help."
     echo ""
     echo "Examples:"
     echo "  $0                         # install to ~/.local, SQLite backend"
@@ -53,6 +61,10 @@ while [[ $# -gt 0 ]]; do
         --postgres)
             USE_POSTGRES_INTERACTIVE=1
             shift
+            ;;
+        --postgres-params-file)
+            POSTGRES_PARAMS_FILE="$2"
+            shift 2
             ;;
         --database-url-file)
             DATABASE_URL_FILE="$2"
@@ -86,7 +98,37 @@ if [[ -n "$USE_POSTGRES_INTERACTIVE" ]]; then
         exit 1
     fi
     # URL-encode password so special characters don't break the URL (pass via stdin to avoid exposure in process list)
-    pg_pass_encoded="$(printf '%s' "$pg_pass" | "$PYTHON" -c "import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=''))" 2>/dev/null)" || pg_pass_encoded="$pg_pass"
+    pg_pass_encoded="$(printf '%s' "$pg_pass" | "$PYTHON" -c \"import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=''))\" 2>/dev/null)" || pg_pass_encoded="$pg_pass"
+    DATABASE_URL="postgresql+psycopg2://${pg_user}:${pg_pass_encoded}@${pg_host}:${pg_port}/${pg_db}"
+elif [[ -n "$POSTGRES_PARAMS_FILE" ]]; then
+    if [[ ! -r "$POSTGRES_PARAMS_FILE" ]]; then
+        echo "Error: Cannot read --postgres-params-file $POSTGRES_PARAMS_FILE" >&2
+        exit 1
+    fi
+    # Load PGHOST, PGPORT, PGUSER, PGDATABASE from a simple env-style file (no secrets).
+    # Example:
+    #   PGHOST=my-host
+    #   PGPORT=5432
+    #   PGUSER=db_user
+    #   PGDATABASE=timesheets
+    # shellcheck disable=SC1090
+    . "$POSTGRES_PARAMS_FILE"
+    pg_host="${PGHOST:-localhost}"
+    pg_port="${PGPORT:-5432}"
+    pg_user="${PGUSER:-}"
+    pg_db="${PGDATABASE:-}"
+    echo "PostgreSQL connection from params file (password will not be echoed):"
+    echo "  Host: $pg_host"
+    echo "  Port: $pg_port"
+    echo "  User: $pg_user"
+    echo "  Database: $pg_db"
+    read -r -s -p "  Password: " pg_pass
+    echo ""
+    if [[ -z "$pg_user" ]] || [[ -z "$pg_db" ]]; then
+        echo "Error: PGUSER and PGDATABASE are required in $POSTGRES_PARAMS_FILE." >&2
+        exit 1
+    fi
+    pg_pass_encoded="$(printf '%s' "$pg_pass" | "$PYTHON" -c \"import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=''))\" 2>/dev/null)" || pg_pass_encoded="$pg_pass"
     DATABASE_URL="postgresql+psycopg2://${pg_user}:${pg_pass_encoded}@${pg_host}:${pg_port}/${pg_db}"
 elif [[ -n "$DATABASE_URL_FILE" ]]; then
     if [[ ! -r "$DATABASE_URL_FILE" ]]; then

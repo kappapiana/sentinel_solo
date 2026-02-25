@@ -47,7 +47,22 @@ Every matter and submatter has an **effective hourly rate** used to compute char
 
    On Linux you can use **run.sh**: it runs the app with the project venv (and creates the venv if missing; the script will prompt you to run `python3 -m venv venv && ./venv/bin/pip install -r requirements.txt`).
 
-   **Linux installer (optional):** run `./install.sh` to install under `~/.local` (venv, launcher `sentinel-solo`, and a desktop menu entry). Use `./install.sh --prefix /usr/local` for a system-wide install (may require sudo for directory creation). To use PostgreSQL as the backend, run `./install.sh --postgres` and enter connection details at the prompt (password is not echoed and never appears on the command line), or use `./install.sh --database-url-file /path/to/file` where the file contains the connection string (e.g. `chmod 600` that file). The launcher then sets `DATABASE_URL` from the install dir’s `config.env`. To remove: `./uninstall.sh` (or `./uninstall.sh --prefix /usr/local` if you installed system-wide).
+   **Linux installer (optional):** run `./install.sh` to install under `~/.local` (venv, launcher `sentinel-solo`, and a desktop menu entry). Use `./install.sh --prefix /usr/local` for a system-wide install (may require sudo for directory creation). To use PostgreSQL as the backend:
+
+   - `./install.sh --postgres` – interactive prompt (host, port, user, db, password; password not echoed and never appears on the command line).
+   - `./install.sh --postgres-params-file /path/to/pg.conf` – read host/port/user/db (no password) from a simple env-style file, still prompting for the password:
+
+     ```bash
+     # /path/to/pg.conf (NO secrets)
+     PGHOST=my-host
+     PGPORT=5432
+     PGUSER=db_user
+     PGDATABASE=timesheets
+     ```
+
+   - `./install.sh --database-url-file /path/to/url.txt` – read a full PostgreSQL URL (including password) from a file (e.g. `chmod 600` that file).
+
+   In all cases the installer writes a `config.env` with `DATABASE_URL` into the install dir, and the launcher sets `DATABASE_URL` from there. To remove: `./uninstall.sh` (or `./uninstall.sh --prefix /usr/local` if you installed system-wide).
 
 3. **Install dependencies**
    ```bash

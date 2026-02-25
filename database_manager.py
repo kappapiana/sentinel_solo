@@ -37,8 +37,13 @@ class DatabaseManager:
                 db_path = Path(__file__).resolve().parent / "sentinel.db"
             path_str = str(db_path)
             self._engine = create_engine(f"sqlite:///{path_str}", echo=False)
+        # Keep ORM instances usable after commit (we often return them from
+        # methods and access attributes after the session context ends).
         self._session_factory = sessionmaker(
-            bind=self._engine, autocommit=False, autoflush=False
+            bind=self._engine,
+            autocommit=False,
+            autoflush=False,
+            expire_on_commit=False,
         )
         self._setup_postgres_pool_checkout()
 
@@ -78,6 +83,23 @@ class DatabaseManager:
         """Yield a new session (context manager)."""
         session = self._session_factory()
         try:
+            # For PostgreSQL, ensure app.current_user_id is set for this session so RLS
+            # policies on matters/time_entries/users see the correct owner/admin.
+            if (
+                self._engine.dialect.name == "postgresql"
+                and self._current_user_id is not None
+            ):
+                try:
+                    session.execute(
+                        text(
+                            "SELECT set_config('app.current_user_id', :uid, true)"
+                        ),
+                        {"uid": str(self._current_user_id)},
+                    )
+                except Exception:
+                    # If this fails for any reason, we still proceed; RLS will then behave
+                    # as before (may raise if current_user_id is required).
+                    pass
             yield session
         finally:
             session.close()
@@ -396,7 +418,8 @@ class DatabaseManager:
             )
             session.add(user)
             session.commit()
-            session.refresh(user)
+            if self._engine.dialect.name != "postgresql":
+                session.refresh(user)
             return user.id
 
     def _slugify(self, name: str) -> str:
@@ -439,7 +462,11 @@ class DatabaseManager:
             )
             session.add(matter)
             session.commit()
-            session.refresh(matter)
+            # On SQLite we can safely refresh to ensure PK is loaded; on PostgreSQL
+            # RLS can block a re-select, so we skip refresh there and rely on the
+            # in-memory instance having its id set after commit.
+            if self._engine.dialect.name != "postgresql":
+                session.refresh(matter)
             return matter
 
     def update_matter(
@@ -518,7 +545,8 @@ class DatabaseManager:
             )
             session.add(entry)
             session.commit()
-            session.refresh(entry)
+            if self._engine.dialect.name != "postgresql":
+                session.refresh(entry)
             return entry
 
     def stop_timer(self) -> TimeEntry | None:
@@ -538,7 +566,8 @@ class DatabaseManager:
                 entry.end_time - entry.start_time
             ).total_seconds()
             session.commit()
-            session.refresh(entry)
+            if self._engine.dialect.name != "postgresql":
+                session.refresh(entry)
             return entry
 
     def get_running_entry(self) -> TimeEntry | None:
@@ -576,7 +605,8 @@ class DatabaseManager:
             )
             session.add(new_entry)
             session.commit()
-            session.refresh(new_entry)
+            if self._engine.dialect.name != "postgresql":
+                session.refresh(new_entry)
             return new_entry
 
     def update_running_entry_start_time(self, new_start: datetime) -> TimeEntry | None:
@@ -593,7 +623,8 @@ class DatabaseManager:
                 return None
             entry.start_time = new_start
             session.commit()
-            session.refresh(entry)
+            if self._engine.dialect.name != "postgresql":
+                session.refresh(entry)
             return entry
 
     def update_running_entry_description(self, description: str) -> bool:
@@ -1013,7 +1044,8 @@ class DatabaseManager:
             )
             session.add(entry)
             session.commit()
-            session.refresh(entry)
+            if self._engine.dialect.name != "postgresql":
+                session.refresh(entry)
             return entry
 
     def _get_root_matter_name(self, session: Session, matter: Matter) -> str:
@@ -1389,7 +1421,8 @@ class DatabaseManager:
             )
             session.add(user)
             session.commit()
-            session.refresh(user)
+            if self._engine.dialect.name != "postgresql":
+                session.refresh(user)
             return user
 
     def update_user(

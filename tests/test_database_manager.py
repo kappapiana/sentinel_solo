@@ -175,6 +175,21 @@ class TestOwnerFiltering:
         assert len(entries1) >= 1
         assert len(entries2) == 0
 
+    def test_non_admin_can_create_matter_and_timed_task(self, db_user2: DatabaseManager):
+        """Non-admin user can create their own client/matter and log time with the timer."""
+        # User2 is normal user (not admin). They create a root matter (client) and a child matter.
+        client = db_user2.add_matter("User2 Client", "u2-client", parent_id=None)
+        sub = db_user2.add_matter("User2 Task", "u2-task", parent_id=client.id)
+        assert client.owner_id == db_user2.current_user_id
+        assert sub.owner_id == db_user2.current_user_id
+        # Start and stop a timed task on the child matter.
+        db_user2.start_timer(sub.id, "User2 timed task")
+        stopped = db_user2.stop_timer()
+        assert stopped is not None
+        assert stopped.owner_id == db_user2.current_user_id
+        assert stopped.matter_id == sub.id
+        assert stopped.duration_seconds > 0
+
     def test_get_descendant_matter_ids_only_owner_matters(self, db_user1: DatabaseManager, db_user2: DatabaseManager):
         """Descendants are only within the current user's matters."""
         client = db_user1.add_matter("Client", "client", parent_id=None)
