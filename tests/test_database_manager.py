@@ -288,7 +288,7 @@ class TestReportingAggregation:
             assert total >= 0
             assert not_invoiced >= 0
             assert not_invoiced <= total
-            assert rate_source in ("matter", "upper_matter", "user")
+            assert rate_source in ("user_matter", "matter", "upper_matter", "user")
 
     def test_get_time_by_client_and_matter_detailed_invoiced_excluded_from_not_invoiced(
         self, db_user1: DatabaseManager
@@ -582,3 +582,94 @@ class TestRequireUser:
         dm.init_db()
         with pytest.raises(ValueError, match="Current user is not set"):
             dm.get_all_matters()
+
+
+# --- Matter sharing and per-user rates ---
+
+
+class TestMatterSharing:
+    """Share matters with other users; shared user sees matter and time entries."""
+
+    def test_add_and_remove_matter_share(self, db_user1: DatabaseManager, db_user2: DatabaseManager):
+        """Owner can share a matter; list_matter_shares returns shared users; remove_matter_share removes."""
+        client = db_user1.add_matter("Client", "client", parent_id=None)
+        project = db_user1.add_matter("Project", "project", parent_id=client.id)
+        db_user1.add_matter_share(project.id, db_user2.current_user_id)
+        users = db_user1.list_matter_shares(project.id)
+        assert len(users) == 1
+        assert users[0].id == db_user2.current_user_id
+        db_user1.remove_matter_share(project.id, db_user2.current_user_id)
+        users = db_user1.list_matter_shares(project.id)
+        assert len(users) == 0
+
+    def test_shared_user_sees_matter_and_can_log_time(self, db_user1: DatabaseManager, db_user2: DatabaseManager):
+        """After share, user2 sees the matter in get_matters_with_full_paths and can start timer."""
+        client = db_user1.add_matter("Client", "client", parent_id=None)
+        project = db_user1.add_matter("Project", "project", parent_id=client.id)
+        db_user1.add_matter_share(project.id, db_user2.current_user_id)
+        paths = db_user2.get_matters_with_full_paths()
+        path_by_id = {mid: p for mid, p in paths}
+        assert project.id in path_by_id
+        assert path_by_id[project.id] == "Client > Project"
+        db_user2.start_timer(project.id, "User2 work")
+        stopped = db_user2.stop_timer()
+        assert stopped is not None
+        assert stopped.owner_id == db_user2.current_user_id
+        assert stopped.matter_id == project.id
+
+    def test_shared_user_sees_owner_time_entries_on_matter(self, db_user1: DatabaseManager, db_user2: DatabaseManager):
+        """Owner logs time; after share, user2 sees that entry in get_time_entries_by_matter."""
+        client = db_user1.add_matter("Client", "client", parent_id=None)
+        project = db_user1.add_matter("Project", "project", parent_id=client.id)
+        db_user1.start_timer(project.id, "Owner work")
+        db_user1.stop_timer()
+        db_user1.add_matter_share(project.id, db_user2.current_user_id)
+        entries = db_user2.get_time_entries_by_matter(project.id)
+        assert len(entries) >= 1
+        assert any(e.owner_id == db_user1.current_user_id for e in entries)
+
+
+class TestUserMatterRate:
+    """Per-user rate for a matter overrides matter and user default."""
+
+    def test_user_matter_rate_overrides_matter_and_user_default(self, db_user1: DatabaseManager):
+        """When user_matter_rates has a row for (user, matter), get_resolved_hourly_rate uses it (source user_matter)."""
+        db_user1.update_user(db_user1.current_user_id, default_hourly_rate_euro=10.0)
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        db_user1.update_matter(project.id, hourly_rate_euro=50.0)
+        db_user1.set_user_matter_rate(db_user1.current_user_id, project.id, 75.0)
+        rate, source = db_user1.get_resolved_hourly_rate(project.id)
+        assert rate == 75.0
+        assert source == "user_matter"
+
+    def test_clear_user_matter_rate_falls_back_to_matter(self, db_user1: DatabaseManager):
+        """Clearing user_matter rate uses matter rate."""
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        db_user1.update_matter(project.id, hourly_rate_euro=40.0)
+        db_user1.set_user_matter_rate(db_user1.current_user_id, project.id, 60.0)
+        db_user1.set_user_matter_rate(db_user1.current_user_id, project.id, None)
+        rate, source = db_user1.get_resolved_hourly_rate(project.id)
+        assert rate == 40.0
+        assert source == "matter"
+
+
+class TestSameNameConflict:
+    """find_owned_matter_with_same_path when sharing."""
+
+    def test_find_owned_matter_with_same_path_returns_match(self, db_user1: DatabaseManager, db_user2: DatabaseManager):
+        """User2 has a matter with path 'Client > Project'; find for user2 and that path returns (matter_id, path)."""
+        client2 = db_user2.add_matter("Client", "client", parent_id=None)
+        project2 = db_user2.add_matter("Project", "project", parent_id=client2.id)
+        result = db_user1.find_owned_matter_with_same_path(db_user2.current_user_id, "Client > Project")
+        assert result is not None
+        mid, path = result
+        assert mid == project2.id
+        assert path == "Client > Project"
+
+    def test_find_owned_matter_with_same_path_returns_none_when_no_match(self, db_user1: DatabaseManager, db_user2: DatabaseManager):
+        """No matter with that path for that user returns None."""
+        db_user2.add_matter("Other", "other", parent_id=None)
+        result = db_user1.find_owned_matter_with_same_path(db_user2.current_user_id, "Client > Project")
+        assert result is None
