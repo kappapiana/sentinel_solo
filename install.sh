@@ -98,7 +98,7 @@ if [[ -n "$USE_POSTGRES_INTERACTIVE" ]]; then
         exit 1
     fi
     # URL-encode password so special characters don't break the URL (pass via stdin to avoid exposure in process list)
-    pg_pass_encoded="$(printf '%s' "$pg_pass" | "$PYTHON" -c \"import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=''))\" 2>/dev/null)" || pg_pass_encoded="$pg_pass"
+    pg_pass_encoded="$(printf '%s' "$pg_pass" | "$PYTHON" -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=\"\"))' 2>/dev/null)" || pg_pass_encoded="$pg_pass"
     DATABASE_URL="postgresql+psycopg2://${pg_user}:${pg_pass_encoded}@${pg_host}:${pg_port}/${pg_db}"
 elif [[ -n "$POSTGRES_PARAMS_FILE" ]]; then
     if [[ ! -r "$POSTGRES_PARAMS_FILE" ]]; then
@@ -128,7 +128,7 @@ elif [[ -n "$POSTGRES_PARAMS_FILE" ]]; then
         echo "Error: PGUSER and PGDATABASE are required in $POSTGRES_PARAMS_FILE." >&2
         exit 1
     fi
-    pg_pass_encoded="$(printf '%s' "$pg_pass" | "$PYTHON" -c \"import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=''))\" 2>/dev/null)" || pg_pass_encoded="$pg_pass"
+    pg_pass_encoded="$(printf '%s' "$pg_pass" | "$PYTHON" -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=\"\"))' 2>/dev/null)" || pg_pass_encoded="$pg_pass"
     DATABASE_URL="postgresql+psycopg2://${pg_user}:${pg_pass_encoded}@${pg_host}:${pg_port}/${pg_db}"
 elif [[ -n "$DATABASE_URL_FILE" ]]; then
     if [[ ! -r "$DATABASE_URL_FILE" ]]; then
