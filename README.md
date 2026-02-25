@@ -1,4 +1,4 @@
-# Sentinel Solo (v0.1.0)
+# Sentinel Solo (v0.1.1)
 
 A desktop time-tracking app with a hierarchy of **clients** and **matters** (projects/subprojects). Log time with a timer or by manual entry; view and edit time entries per matter; set **hourly rates** (EUR) for invoicing; move or merge matters with time ported correctly.
 
