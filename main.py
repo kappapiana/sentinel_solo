@@ -281,11 +281,17 @@ class SentinelApp:
             on_change=on_rail_change,
         )
 
+        async def _do_logout(_):
+            await page.shared_preferences.set(STORAGE_USER_ID, "")
+            await page.shared_preferences.set(STORAGE_USERNAME, "")
+            if logout_callback:
+                logout_callback()
+
         def _on_rail_change_with_logout(e):
             if logout_callback and e.control.selected_index == len(destinations) - 1:
                 e.control.selected_index = 0
                 page.update()
-                logout_callback()
+                page.run_task(_do_logout, e)
                 return
             on_rail_change(e)
 
@@ -293,22 +299,12 @@ class SentinelApp:
 
         body = ft.Container(ref=self.body_ref, content=timer_container, expand=True)
 
-        async def _do_logout(_):
-            await page.shared_preferences.set(STORAGE_USER_ID, "")
-            await page.shared_preferences.set(STORAGE_USERNAME, "")
-            if logout_callback:
-                logout_callback()
-
-        def _on_logout_click(e):
-            page.run_task(_do_logout, e)
-
         top_bar = ft.Row(
             [
-                ft.Text(f"Logged in as {current_username}", size=14, color=ft.Colors.ON_SURFACE_VARIANT),
-                ft.IconButton(
-                    icon=ft.Icons.LOGOUT,
-                    tooltip="Log out",
-                    on_click=_on_logout_click,
+                ft.Text(
+                    f"Logged in as {current_username}",
+                    size=14,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
                 ),
             ],
             alignment=ft.MainAxisAlignment.END,
@@ -3075,15 +3071,7 @@ async def main(page: ft.Page) -> None:
         page.add(ft.SafeArea(ft.Container(view, expand=True)))
         page.update()
 
-    stored_id = await page.shared_preferences.get(STORAGE_USER_ID)
-    if stored_id is not None:
-        try:
-            uid = int(stored_id)
-            username = await page.shared_preferences.get(STORAGE_USERNAME) or ""
-            await go_main(uid, username)
-            return
-        except (ValueError, TypeError):
-            pass
+    # Always show the login / first-admin screen on app start.
     show_login()
 
 
