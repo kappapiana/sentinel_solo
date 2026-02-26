@@ -15,8 +15,9 @@ _UNSET = object()
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy import inspect, event
+from sqlalchemy.exc import ProgrammingError
 
-from models import Base, Matter, TimeEntry, User
+from models import Base, Matter, MatterShare, TimeEntry, User, UserMatterRate
 
 
 class DatabaseManager:
@@ -109,18 +110,50 @@ class DatabaseManager:
         if self._current_user_id is None:
             raise ValueError("Current user is not set.")
 
+    def _visible_matter_ids(self, session: Session) -> set[int]:
+        """Matter IDs the current user can see (owned or shared). Used for SQLite filtering."""
+        if self._current_user_id is None:
+            return set()
+        if self._engine.dialect.name == "postgresql":
+            # Postgres RLS handles visibility; we need explicit list only for cross-table logic.
+            owned = session.query(Matter.id).filter(
+                Matter.owner_id == self._current_user_id
+            ).all()
+            shared = session.query(MatterShare.matter_id).filter(
+                MatterShare.user_id == self._current_user_id
+            ).all()
+            return {r[0] for r in owned} | {r[0] for r in shared}
+        owned = session.query(Matter.id).filter(
+            Matter.owner_id == self._current_user_id
+        ).all()
+        shared = session.query(MatterShare.matter_id).filter(
+            MatterShare.user_id == self._current_user_id
+        ).all()
+        return {r[0] for r in owned} | {r[0] for r in shared}
+
     def _matter_query(self, session: Session):
-        """Query Matter with owner filter on SQLite."""
+        """Query Matter: owned + shared on SQLite; RLS on Postgres."""
         q = session.query(Matter)
         if self._engine.dialect.name == "sqlite" and self._current_user_id is not None:
-            q = q.filter(Matter.owner_id == self._current_user_id)
+            visible = self._visible_matter_ids(session)
+            if visible:
+                q = q.filter(Matter.id.in_(visible))
+            else:
+                q = q.filter(False)
         return q
 
     def _time_entry_query(self, session: Session):
-        """Query TimeEntry with owner filter on SQLite."""
+        """Query TimeEntry: own entries or entries on visible matters (owned + shared)."""
         q = session.query(TimeEntry)
         if self._engine.dialect.name == "sqlite" and self._current_user_id is not None:
-            q = q.filter(TimeEntry.owner_id == self._current_user_id)
+            visible = self._visible_matter_ids(session)
+            if visible:
+                q = q.filter(
+                    (TimeEntry.owner_id == self._current_user_id)
+                    | TimeEntry.matter_id.in_(visible)
+                )
+            else:
+                q = q.filter(TimeEntry.owner_id == self._current_user_id)
         return q
 
     def _is_admin(self, session: Session) -> bool:
@@ -165,6 +198,25 @@ class DatabaseManager:
                 if "activity_group_id" not in te_cols:
                     conn.execute(text("ALTER TABLE time_entries ADD COLUMN activity_group_id INTEGER REFERENCES time_entries(id)"))
                     conn.commit()
+            if "matter_shares" not in insp.get_table_names():
+                conn.execute(text(
+                    "CREATE TABLE matter_shares ("
+                    "matter_id INTEGER NOT NULL REFERENCES matters(id) ON DELETE CASCADE, "
+                    "user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, "
+                    "PRIMARY KEY (matter_id, user_id), "
+                    "UNIQUE (matter_id, user_id))"
+                ))
+                conn.commit()
+            if "user_matter_rates" not in insp.get_table_names():
+                conn.execute(text(
+                    "CREATE TABLE user_matter_rates ("
+                    "user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, "
+                    "matter_id INTEGER NOT NULL REFERENCES matters(id) ON DELETE CASCADE, "
+                    "hourly_rate_euro REAL NOT NULL, "
+                    "PRIMARY KEY (user_id, matter_id), "
+                    "UNIQUE (user_id, matter_id))"
+                ))
+                conn.commit()
         if self._engine.dialect.name == "postgresql":
             self._init_postgres_rls()
 
@@ -245,10 +297,94 @@ class DatabaseManager:
                         """
                     )
                 )
+                conn.execute(
+                    text(
+                        """
+                        CREATE OR REPLACE FUNCTION app.list_users_for_share(p_caller_id int)
+                        RETURNS TABLE(id int, username text) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
+                        AS $$
+                        SELECT u.id, u.username FROM public.users u ORDER BY u.username
+                        $$
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        CREATE OR REPLACE FUNCTION app.get_owned_matter_paths(p_user_id int)
+                        RETURNS TABLE(matter_id int, path text) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
+                        AS $$
+                        WITH RECURSIVE paths AS (
+                            SELECT id AS node_id, name AS path
+                            FROM public.matters
+                            WHERE owner_id = p_user_id AND parent_id IS NULL
+                            UNION ALL
+                            SELECT m.id, p.path || ' > ' || m.name
+                            FROM public.matters m
+                            JOIN paths p ON m.parent_id = p.node_id
+                            WHERE m.owner_id = p_user_id
+                        )
+                        SELECT node_id AS matter_id, path FROM paths
+                        $$
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        CREATE OR REPLACE FUNCTION app.merge_other_matter_into(p_caller_id int, p_src_id int, p_tgt_id int)
+                        RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+                        AS $$
+                        DECLARE
+                            tgt_owner int;
+                            src_rec record;
+                        BEGIN
+                            SELECT owner_id INTO tgt_owner FROM public.matters WHERE id = p_tgt_id;
+                            IF tgt_owner IS NULL OR tgt_owner != p_caller_id THEN
+                                RETURN 'Target matter not found or not owned by you.';
+                            END IF;
+                            SELECT id, owner_id, parent_id INTO src_rec FROM public.matters WHERE id = p_src_id;
+                            IF src_rec.id IS NULL THEN
+                                RETURN 'Source matter not found.';
+                            END IF;
+                            IF p_src_id = p_tgt_id THEN
+                                RETURN 'Cannot merge a matter into itself.';
+                            END IF;
+                            UPDATE public.time_entries SET matter_id = p_tgt_id WHERE matter_id = p_src_id;
+                            UPDATE public.matters SET parent_id = p_tgt_id WHERE parent_id = p_src_id;
+                            DELETE FROM public.matter_shares WHERE matter_id = p_src_id;
+                            DELETE FROM public.user_matter_rates WHERE matter_id = p_src_id;
+                            DELETE FROM public.matters WHERE id = p_src_id;
+                            RETURN NULL;
+                        END
+                        $$
+                        """
+                    )
+                )
             for table in ("matters", "time_entries", "users"):
                 conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
                 conn.execute(text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY"))
-            # matters: owner for write; owner or admin for read (admin can export all)
+            # matter_shares and user_matter_rates: create if not exist (Base.metadata.create_all already ran).
+            # These helper tables do not use RLS to avoid recursive policies with matters; access is enforced in code.
+            for stmt in (
+                """
+                CREATE TABLE IF NOT EXISTS matter_shares (
+                    matter_id INTEGER NOT NULL REFERENCES matters(id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    PRIMARY KEY (matter_id, user_id)
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS user_matter_rates (
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    matter_id INTEGER NOT NULL REFERENCES matters(id) ON DELETE CASCADE,
+                    hourly_rate_euro REAL NOT NULL,
+                    PRIMARY KEY (user_id, matter_id)
+                )
+                """,
+            ):
+                conn.execute(text(stmt))
+            # matters: owner for write; owner or shared or admin for read
             conn.execute(
                 text(
                     """
@@ -256,6 +392,20 @@ class DatabaseManager:
                     CREATE POLICY matters_owner ON matters
                     FOR ALL USING (owner_id::text = current_setting('app.current_user_id', true))
                     WITH CHECK (owner_id::text = current_setting('app.current_user_id', true))
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    DROP POLICY IF EXISTS matters_shared_select ON matters;
+                    CREATE POLICY matters_shared_select ON matters FOR SELECT
+                    USING (
+                        id IN (
+                            SELECT matter_id FROM matter_shares
+                            WHERE user_id::text = current_setting('app.current_user_id', true)
+                        )
+                    )
                     """
                 )
             )
@@ -275,6 +425,24 @@ class DatabaseManager:
                     CREATE POLICY time_entries_owner ON time_entries
                     FOR ALL USING (owner_id::text = current_setting('app.current_user_id', true))
                     WITH CHECK (owner_id::text = current_setting('app.current_user_id', true))
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    DROP POLICY IF EXISTS time_entries_shared_select ON time_entries;
+                    CREATE POLICY time_entries_shared_select ON time_entries FOR SELECT
+                    USING (
+                        matter_id IN (
+                            SELECT id FROM matters
+                            WHERE owner_id::text = current_setting('app.current_user_id', true)
+                            OR id IN (
+                                SELECT matter_id FROM matter_shares
+                                WHERE user_id::text = current_setting('app.current_user_id', true)
+                            )
+                        )
+                    )
                     """
                 )
             )
@@ -333,6 +501,20 @@ class DatabaseManager:
                     """
                 )
             )
+            # Ensure helper tables have no RLS policies enabled (to avoid recursive dependencies with matters).
+            for stmt in (
+                "DROP POLICY IF EXISTS matter_shares_select ON matter_shares",
+                "DROP POLICY IF EXISTS matter_shares_owner_select ON matter_shares",
+                "DROP POLICY IF EXISTS matter_shares_insert ON matter_shares",
+                "DROP POLICY IF EXISTS matter_shares_delete ON matter_shares",
+                "DROP POLICY IF EXISTS matter_shares_admin_select ON matter_shares",
+                "DROP POLICY IF EXISTS user_matter_rates_select ON user_matter_rates",
+                "DROP POLICY IF EXISTS user_matter_rates_all ON user_matter_rates",
+                "DROP POLICY IF EXISTS user_matter_rates_admin_select ON user_matter_rates",
+            ):
+                conn.execute(text(stmt))
+            for table in ("matter_shares", "user_matter_rates"):
+                conn.execute(text(f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY"))
             conn.execute(
                 text(
                     """
@@ -799,10 +981,14 @@ class DatabaseManager:
                 users = session.query(User).order_by(User.id).all()
                 matters = session.query(Matter).order_by(Matter.id).all()
                 entries = session.query(TimeEntry).order_by(TimeEntry.id).all()
+                shares = session.query(MatterShare).order_by(MatterShare.matter_id, MatterShare.user_id).all()
+                umr = session.query(UserMatterRate).order_by(UserMatterRate.user_id, UserMatterRate.matter_id).all()
             else:
                 users = session.query(User).order_by(User.id).all()
                 matters = session.query(Matter).order_by(Matter.id).all()
                 entries = session.query(TimeEntry).order_by(TimeEntry.id).all()
+                shares = session.query(MatterShare).order_by(MatterShare.matter_id, MatterShare.user_id).all()
+                umr = session.query(UserMatterRate).order_by(UserMatterRate.user_id, UserMatterRate.matter_id).all()
         return {
             "version": self.BACKUP_VERSION,
             "exported_at": datetime.now().isoformat(),
@@ -841,6 +1027,14 @@ class DatabaseManager:
                 }
                 for e in entries
             ],
+            "matter_shares": [
+                {"matter_id": s.matter_id, "user_id": s.user_id}
+                for s in shares
+            ],
+            "user_matter_rates": [
+                {"user_id": u.user_id, "matter_id": u.matter_id, "hourly_rate_euro": u.hourly_rate_euro}
+                for u in umr
+            ],
         }
 
     def import_full_database(self, data: dict) -> None:
@@ -861,6 +1055,8 @@ class DatabaseManager:
                 raise ValueError("Only admin can import the full database.")
             # Delete in FK order
             session.query(TimeEntry).delete(synchronize_session=False)
+            session.query(MatterShare).delete(synchronize_session=False)
+            session.query(UserMatterRate).delete(synchronize_session=False)
             session.query(Matter).delete(synchronize_session=False)
             session.query(User).delete(synchronize_session=False)
             session.flush()
@@ -885,6 +1081,18 @@ class DatabaseManager:
                         name=row["name"],
                         parent_id=row.get("parent_id"),
                         hourly_rate_euro=row.get("hourly_rate_euro"),
+                    )
+                )
+            session.flush()
+            for row in data.get("matter_shares", []):
+                session.add(MatterShare(matter_id=row["matter_id"], user_id=row["user_id"]))
+            session.flush()
+            for row in data.get("user_matter_rates", []):
+                session.add(
+                    UserMatterRate(
+                        user_id=row["user_id"],
+                        matter_id=row["matter_id"],
+                        hourly_rate_euro=float(row["hourly_rate_euro"]),
                     )
                 )
             session.flush()
@@ -1061,7 +1269,7 @@ class DatabaseManager:
 
     def get_resolved_hourly_rate(
         self, matter_id: int, owner_id: int | None = None
-    ) -> tuple[float, Literal["matter", "upper_matter", "user"]]:
+    ) -> tuple[float, Literal["user_matter", "matter", "upper_matter", "user"]]:
         """
         Resolve hourly rate (EUR) for a matter: matter > ancestor (client/parent) > user default.
         owner_id is used for user fallback; if None, use current_user_id.
@@ -1085,14 +1293,24 @@ class DatabaseManager:
         matter: Matter | None,
         owner_id: int,
         matter_query,
-    ) -> tuple[float, Literal["matter", "upper_matter", "user"]]:
-        """Resolve rate from matter (walk up to root), then user default. matter_query used to fetch parents."""
+    ) -> tuple[float, Literal["user_matter", "matter", "upper_matter", "user"]]:
+        """Resolve rate: user_matter_rates (per-user per-matter) first, then matter/parent chain, then user default."""
         if matter is None:
             user = session.query(User).filter(User.id == owner_id).first()
             default = (
                 getattr(user, "default_hourly_rate_euro", None) if user else None
             )
             return (float(default) if default is not None else 0.0, "user")
+        umr = (
+            session.query(UserMatterRate)
+            .filter(
+                UserMatterRate.user_id == owner_id,
+                UserMatterRate.matter_id == matter.id,
+            )
+            .first()
+        )
+        if umr is not None and getattr(umr, "hourly_rate_euro", None) is not None:
+            return (float(umr.hourly_rate_euro), "user_matter")
         rate = getattr(matter, "hourly_rate_euro", None)
         if rate is not None:
             return (float(rate), "matter")
@@ -1206,6 +1424,256 @@ class DatabaseManager:
             session.delete(source)
             session.commit()
 
+    def merge_other_user_matter_into_mine(
+        self, source_matter_id: int, target_matter_id: int
+    ) -> None:
+        """Merge another user's matter (source) into current user's matter (target). Used when resolving same-name conflict before share. Target must be owned by current user."""
+        self._require_user()
+        with self._session() as session:
+            target = self._matter_query(session).filter(
+                Matter.id == target_matter_id
+            ).first()
+            if target is None or target.owner_id != self._current_user_id:
+                raise ValueError("Target matter not found or not owned by you.")
+            if self._engine.dialect.name == "postgresql":
+                row = session.execute(
+                    text(
+                        "SELECT app.merge_other_matter_into(:caller_id, :src_id, :tgt_id)"
+                    ),
+                    {
+                        "caller_id": self._current_user_id,
+                        "src_id": source_matter_id,
+                        "tgt_id": target_matter_id,
+                    },
+                ).fetchone()
+                if row and row[0] is not None:
+                    raise ValueError(row[0])
+                session.commit()
+                return
+            source = (
+                session.query(Matter).filter(Matter.id == source_matter_id).first()
+            )
+            if source is None:
+                raise ValueError("Source matter not found.")
+            if source_matter_id == target_matter_id:
+                raise ValueError("Cannot merge a matter into itself.")
+            if self._is_descendant_of(session, target_matter_id, source_matter_id):
+                raise ValueError(
+                    "Cannot merge into a descendant of the source matter."
+                )
+            session.query(TimeEntry).filter(
+                TimeEntry.matter_id == source_matter_id
+            ).update({"matter_id": target_matter_id})
+            session.query(Matter).filter(
+                Matter.parent_id == source_matter_id
+            ).update({"parent_id": target_matter_id})
+            session.query(MatterShare).filter(
+                MatterShare.matter_id == source_matter_id
+            ).delete()
+            session.query(UserMatterRate).filter(
+                UserMatterRate.matter_id == source_matter_id
+            ).delete()
+            session.delete(source)
+            session.commit()
+
+    def add_matter_share(self, matter_id: int, user_id: int) -> None:
+        """Share a matter with a user. Caller must be the matter owner. Idempotent if already shared."""
+        self._require_user()
+        with self._session() as session:
+            matter = self._matter_query(session).filter(Matter.id == matter_id).first()
+            if matter is None:
+                raise ValueError("Matter not found.")
+            if matter.owner_id != self._current_user_id:
+                raise ValueError("Only the matter owner can share it.")
+            if user_id == self._current_user_id:
+                raise ValueError("Cannot share with yourself.")
+            existing = (
+                session.query(MatterShare)
+                .filter(MatterShare.matter_id == matter_id, MatterShare.user_id == user_id)
+                .first()
+            )
+            if existing:
+                return
+            session.add(MatterShare(matter_id=matter_id, user_id=user_id))
+            session.commit()
+
+    def remove_matter_share(self, matter_id: int, user_id: int) -> None:
+        """Remove a user from matter share. Caller must be the matter owner."""
+        self._require_user()
+        with self._session() as session:
+            matter = self._matter_query(session).filter(Matter.id == matter_id).first()
+            if matter is None:
+                raise ValueError("Matter not found.")
+            if matter.owner_id != self._current_user_id:
+                raise ValueError("Only the matter owner can remove a share.")
+            session.query(MatterShare).filter(
+                MatterShare.matter_id == matter_id,
+                MatterShare.user_id == user_id,
+            ).delete()
+            session.commit()
+
+    def list_matter_shares(self, matter_id: int) -> list[User]:
+        """Return users with whom the matter is shared. Caller must see the matter (owner or shared)."""
+        self._require_user()
+        with self._session() as session:
+            matter = self._matter_query(session).filter(Matter.id == matter_id).first()
+            if matter is None:
+                raise ValueError("Matter not found.")
+            if matter.owner_id != self._current_user_id:
+                return []
+            rows = (
+                session.query(User)
+                .join(MatterShare, MatterShare.user_id == User.id)
+                .filter(MatterShare.matter_id == matter_id)
+                .order_by(User.username)
+                .all()
+            )
+            return list(rows)
+
+    def get_matter_access_users_with_rates(
+        self, matter_id: int
+    ) -> list[tuple[int, str, float | None]]:
+        """Return (user_id, username, hourly_rate_euro or None) for owner and all shared users. Used for per-user rate UI. Caller must have access to the matter."""
+        self._require_user()
+        with self._session() as session:
+            matter = self._matter_query(session).filter(Matter.id == matter_id).first()
+            if matter is None:
+                raise ValueError("Matter not found.")
+            result: list[tuple[int, str, float | None]] = []
+            owner = session.query(User).filter(User.id == matter.owner_id).first()
+            if owner:
+                umr = (
+                    session.query(UserMatterRate)
+                    .filter(
+                        UserMatterRate.user_id == owner.id,
+                        UserMatterRate.matter_id == matter_id,
+                    )
+                    .first()
+                )
+                rate = getattr(umr, "hourly_rate_euro", None) if umr else None
+                result.append((owner.id, owner.username, rate))
+            shared_users = (
+                session.query(User)
+                .join(MatterShare, MatterShare.user_id == User.id)
+                .filter(MatterShare.matter_id == matter_id)
+                .order_by(User.username)
+                .all()
+            )
+            for u in shared_users:
+                umr = (
+                    session.query(UserMatterRate)
+                    .filter(
+                        UserMatterRate.user_id == u.id,
+                        UserMatterRate.matter_id == matter_id,
+                    )
+                    .first()
+                )
+                rate = getattr(umr, "hourly_rate_euro", None) if umr else None
+                result.append((u.id, u.username, rate))
+            return result
+
+    def list_users_for_share(self) -> list[tuple[int, str]]:
+        """Return (id, username) for all users except current, for share dropdown. Works for non-admin on Postgres via SECURITY DEFINER."""
+        self._require_user()
+        if self._engine.dialect.name == "postgresql":
+            with self._session() as session:
+                try:
+                    rows = session.execute(
+                        text("SELECT id, username FROM app.list_users_for_share(:cid)"),
+                        {"cid": self._current_user_id},
+                    ).fetchall()
+                except ProgrammingError as exc:
+                    # Older Postgres deployments may not have app.list_users_for_share yet.
+                    # Only fall back (and recover the transaction) when that specific
+                    # function is missing; otherwise re-raise.
+                    if "list_users_for_share" not in str(exc):
+                        raise
+                    # Clear the failed transaction before issuing another statement.
+                    session.rollback()
+                    rows = session.execute(
+                        text(
+                            "SELECT id, username, password_hash, is_admin, default_hourly_rate_euro "
+                            "FROM app.list_users(:id)"
+                        ),
+                        {"id": self._current_user_id},
+                    ).fetchall()
+                return [(r[0], r[1]) for r in rows if r[0] != self._current_user_id]
+        with self._session() as session:
+            users = session.query(User).filter(User.id != self._current_user_id).order_by(User.username).all()
+            return [(u.id, u.username) for u in users]
+
+    def set_user_matter_rate(
+        self,
+        user_id: int,
+        matter_id: int,
+        hourly_rate_euro: float | None,
+    ) -> None:
+        """Set or clear per-user rate for a matter. None clears. Caller must be matter owner or the user setting own rate."""
+        self._require_user()
+        with self._session() as session:
+            matter = self._matter_query(session).filter(Matter.id == matter_id).first()
+            if matter is None:
+                raise ValueError("Matter not found.")
+            visible = self._visible_matter_ids(session)
+            if matter_id not in visible:
+                raise ValueError("Matter not found or no access.")
+            if user_id != self._current_user_id and matter.owner_id != self._current_user_id:
+                raise ValueError("Only the matter owner or the user can set that user's rate.")
+            existing = (
+                session.query(UserMatterRate)
+                .filter(UserMatterRate.user_id == user_id, UserMatterRate.matter_id == matter_id)
+                .first()
+            )
+            if hourly_rate_euro is None:
+                if existing:
+                    session.delete(existing)
+                session.commit()
+                return
+            if existing:
+                existing.hourly_rate_euro = float(hourly_rate_euro)
+            else:
+                session.add(
+                    UserMatterRate(
+                        user_id=user_id,
+                        matter_id=matter_id,
+                        hourly_rate_euro=float(hourly_rate_euro),
+                    )
+                )
+            session.commit()
+
+    def find_owned_matter_with_same_path(
+        self, user_id: int, full_path: str
+    ) -> tuple[int, str] | None:
+        """If the given user (by id) owns a matter whose full path equals full_path, return (matter_id, path); else None. Used for same-name conflict when sharing."""
+        self._require_user()
+        with self._session() as session:
+            if self._engine.dialect.name == "postgresql":
+                try:
+                    rows = session.execute(
+                        text("SELECT matter_id, path FROM app.get_owned_matter_paths(:uid)"),
+                        {"uid": user_id},
+                    ).fetchall()
+                except ProgrammingError as exc:
+                    # Older Postgres deployments may not have app.get_owned_matter_paths yet.
+                    # If some other error occurs, re-raise it.
+                    if "get_owned_matter_paths" not in str(exc):
+                        raise
+                    # Clear failed transaction before falling back to ORM-based lookup.
+                    session.rollback()
+                    rows = []
+                for r in rows:
+                    if r[1] == full_path:
+                        return (r[0], r[1])
+                # If function is missing or no match found, fall back to ORM path computation below.
+            matters = (
+                session.query(Matter).filter(Matter.owner_id == user_id).all()
+            )
+            for m in matters:
+                path = m.get_full_path(session)
+                if path == full_path:
+                    return (m.id, path)
+            return None
+
     def get_time_by_client_and_matter(
         self,
         date_from: date | None = None,
@@ -1243,7 +1711,7 @@ class DatabaseManager:
         self,
         date_from: date | None = None,
         date_to: date | None = None,
-    ) -> list[tuple[str, str, float, float, float, float, Literal["matter", "upper_matter", "user"]]]:
+    ) -> list[tuple[str, str, float, float, float, float, Literal["user_matter", "matter", "upper_matter", "user"]]]:
         """Returns (client, matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_invoiced_amount_eur, rate_source)."""
         self._require_user()
         with self._session() as session:

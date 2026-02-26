@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 
 from database_manager import DatabaseManager, db
 
-__version__ = "v0.1.2"
+__version__ = "v0.2.0"
 
 # Storage keys for persisted login (optional restore)
 STORAGE_USER_ID = "user_id"
@@ -26,8 +26,10 @@ DATETIME_FMT = "%Y-%m-%d %H:%M"
 TIME_FMT = "%H:%M"
 
 
-# Rate source colors for chargeable amounts: user=red, upper_matter=orange, matter=green
+# Rate source colors for chargeable amounts: user_matter=teal, matter=green, upper_matter=orange, user=red
 def _rate_source_color(source: str) -> str:
+    if source == "user_matter":
+        return "teal"
     if source == "matter":
         return "green"
     if source == "upper_matter":
@@ -1047,6 +1049,13 @@ class SentinelApp:
         merge_expanded: set = set()
         move_dialog_ref = ft.Ref[ft.AlertDialog]()
         merge_dialog_ref = ft.Ref[ft.AlertDialog]()
+        share_matter_id_holder: list = [None]
+        share_path_holder: list = [None]
+        share_list_ref = ft.Ref[ft.Column]()
+        share_add_dropdown_ref = ft.Ref[ft.Dropdown]()
+        share_dialog_ref = ft.Ref[ft.AlertDialog]()
+        conflict_dialog_ref = ft.Ref[ft.AlertDialog]()
+        conflict_data_holder: list = [None]
     
         time_entries_matter_id: list = [None]
         time_entries_path: list = [None]
@@ -1070,11 +1079,13 @@ class SentinelApp:
             matters = self.db.get_all_matters()
             path_list = self.db.get_matters_with_full_paths()
             path_by_id = {mid: path for mid, path in path_list}
-            by_client: dict[str, list[tuple[int, str, str]]] = defaultdict(list)
+            cur = self.db.current_user_id
+            by_client: dict[str, list[tuple[int, str, str, bool]]] = defaultdict(list)
             for m in matters:
                 path = path_by_id.get(m.id, m.name)
                 client = path.split(" > ")[0] if " > " in path else path
-                by_client[client].append((m.id, path, m.matter_code))
+                is_owner = cur is not None and m.owner_id == cur
+                by_client[client].append((m.id, path, m.matter_code, is_owner))
             for client in by_client:
                 by_client[client].sort(key=lambda x: x[1])
             return by_client
@@ -1094,38 +1105,48 @@ class SentinelApp:
                         on_click=lambda e, c=client_name: _on_toggle_client(c),
                     ),
                 )
+                menu_items_builder = []
+                for mid, path, code, is_owner in items:
+                    display_path = path if is_owner else f"{path} (shared)"
+                    items_list = [
+                        ft.PopupMenuItem(
+                            content="Edit rate…",
+                            on_click=lambda e, m=mid, p=path: open_edit_matter_dialog(m, p),
+                        ),
+                        ft.PopupMenuItem(
+                            content="Move…",
+                            on_click=lambda e, m=mid, p=path: open_move_dialog(m, p),
+                        ),
+                        ft.PopupMenuItem(
+                            content="Merge…",
+                            on_click=lambda e, m=mid, p=path: open_merge_dialog(m, p),
+                        ),
+                        ft.PopupMenuItem(
+                            content="Time entries",
+                            on_click=lambda e, m=mid, p=path: open_time_entries_dialog(m, p),
+                        ),
+                    ]
+                    if is_owner:
+                        items_list.insert(
+                            0,
+                            ft.PopupMenuItem(
+                                content="Share…",
+                                on_click=lambda e, m=mid, p=path: open_share_dialog(m, p),
+                            ),
+                        )
+                    menu_items_builder.append(
+                        ft.ListTile(
+                            title=ft.Text(display_path, size=14),
+                            subtitle=ft.Text(code, size=12),
+                            trailing=ft.PopupMenuButton(
+                                icon=ft.Icons.MORE_VERT,
+                                items=items_list,
+                            ),
+                        )
+                    )
                 controls.append(
                     ft.Container(
-                        content=ft.Column(
-                            [
-                                ft.ListTile(
-                                    title=ft.Text(path, size=14),
-                                    subtitle=ft.Text(code, size=12),
-                                    trailing=ft.PopupMenuButton(
-                                        icon=ft.Icons.MORE_VERT,
-                                        items=[
-                                            ft.PopupMenuItem(
-                                                content="Edit rate…",
-                                                on_click=lambda e, m=mid, p=path: open_edit_matter_dialog(m, p),
-                                            ),
-                                            ft.PopupMenuItem(
-                                                content="Move…",
-                                                on_click=lambda e, m=mid, p=path: open_move_dialog(m, p),
-                                            ),
-                                            ft.PopupMenuItem(
-                                                content="Merge…",
-                                                on_click=lambda e, m=mid, p=path: open_merge_dialog(m, p),
-                                            ),
-                                            ft.PopupMenuItem(
-                                                content="Time entries",
-                                                on_click=lambda e, m=mid, p=path: open_time_entries_dialog(m, p),
-                                            ),
-                                        ],
-                                    ),
-                                )
-                                for mid, path, code in items
-                            ],
-                        ),
+                        content=ft.Column(menu_items_builder),
                         visible=is_expanded,
                         padding=ft.Padding.only(left=24),
                     ),
@@ -1367,6 +1388,127 @@ class SentinelApp:
                 merge_dialog_ref.current.open = False
             page.update()
     
+        def _build_share_list_controls():
+            mid = share_matter_id_holder[0]
+            if mid is None:
+                return []
+            try:
+                users = self.db.list_matter_shares(mid)
+            except ValueError:
+                return []
+            return [
+                ft.ListTile(
+                    title=ft.Text(u.username, size=14),
+                    trailing=ft.IconButton(
+                        icon=ft.Icons.PERSON_REMOVE,
+                        on_click=lambda e, uid=u.id: on_share_remove(uid),
+                    ),
+                )
+                for u in users
+            ]
+    
+        def refresh_share_list():
+            if share_list_ref.current:
+                share_list_ref.current.controls = _build_share_list_controls()
+            page.update()
+    
+        def open_share_dialog(mid: int, path: str):
+            share_matter_id_holder[0] = mid
+            share_path_holder[0] = path
+            if share_dialog_ref.current:
+                share_dialog_ref.current.title = ft.Text(f"Share: {path}")
+                share_dialog_ref.current.open = True
+            refresh_share_list()
+            if share_add_dropdown_ref.current:
+                opts = self.db.list_users_for_share()
+                share_add_dropdown_ref.current.options = [
+                    ft.DropdownOption(key=str(uid), text=uname) for uid, uname in opts
+                ]
+                share_add_dropdown_ref.current.value = None
+            page.update()
+    
+        def on_share_add(_):
+            mid = share_matter_id_holder[0]
+            path = share_path_holder[0]
+            if mid is None or not share_add_dropdown_ref.current or not share_add_dropdown_ref.current.value:
+                return
+            try:
+                user_id = int(share_add_dropdown_ref.current.value)
+            except (TypeError, ValueError):
+                return
+            conflict = self.db.find_owned_matter_with_same_path(user_id, path)
+            if conflict is not None:
+                other_mid, _ = conflict
+                user = self.db.get_user(user_id)
+                username = user.username if user else str(user_id)
+                conflict_data_holder[0] = (mid, user_id, other_mid, path, username)
+                if conflict_dialog_ref.current:
+                    conflict_dialog_ref.current.title = ft.Text(
+                        f"User {username} has a matter with the same name. Merge their matter into this one?"
+                    )
+                    conflict_dialog_ref.current.open = True
+                page.update()
+                return
+            try:
+                self.db.add_matter_share(mid, user_id)
+                refresh_share_list()
+                share_add_dropdown_ref.current.value = None
+                page.snack_bar = ft.SnackBar(ft.Text("Matter shared."), open=True)
+            except ValueError as err:
+                page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+            page.update()
+    
+        def on_share_remove(user_id: int):
+            mid = share_matter_id_holder[0]
+            if mid is None:
+                return
+            try:
+                self.db.remove_matter_share(mid, user_id)
+                refresh_share_list()
+                page.snack_bar = ft.SnackBar(ft.Text("Share removed."), open=True)
+            except ValueError as err:
+                page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+            page.update()
+    
+        def on_conflict_merge(_):
+            data = conflict_data_holder[0]
+            if conflict_dialog_ref.current:
+                conflict_dialog_ref.current.open = False
+            if data is None:
+                page.update()
+                return
+            mid, user_id, other_mid, path, username = data
+            conflict_data_holder[0] = None
+            try:
+                self.db.merge_other_user_matter_into_mine(other_mid, mid)
+                self.db.add_matter_share(mid, user_id)
+                refresh_share_list()
+                refresh_list()
+                if on_matters_changed:
+                    on_matters_changed()
+                page.snack_bar = ft.SnackBar(
+                    ft.Text(f"Merged {username}'s matter into this one and shared."),
+                    open=True,
+                )
+            except ValueError as err:
+                page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+            page.update()
+    
+        def on_conflict_skip(_):
+            if conflict_dialog_ref.current:
+                conflict_dialog_ref.current.open = False
+            conflict_data_holder[0] = None
+            page.snack_bar = ft.SnackBar(
+                ft.Text("Ask the other user to rename their matter, then try sharing again."),
+                open=True,
+            )
+            page.update()
+    
+        def on_share_close(_):
+            if share_dialog_ref.current:
+                share_dialog_ref.current.open = False
+            page.update()
+    
         def _build_time_entries_list_controls():
             mid = time_entries_matter_id[0]
             if mid is None:
@@ -1527,6 +1669,8 @@ class SentinelApp:
     
         edit_matter_id_holder: list = []
         edit_matter_rate_ref = ft.Ref[ft.TextField]()
+        edit_matter_my_rate_ref = ft.Ref[ft.TextField]()
+        edit_matter_my_rate_container_ref = ft.Ref[ft.Container]()
         edit_matter_dialog_ref = ft.Ref[ft.AlertDialog]()
     
         def open_edit_matter_dialog(mid: int, path: str):
@@ -1536,12 +1680,25 @@ class SentinelApp:
                 return
             edit_matter_id_holder.clear()
             edit_matter_id_holder.append(mid)
+            cur = self.db.current_user_id
+            is_owner = cur is not None and matter.owner_id == cur
             if edit_matter_rate_ref.current:
                 is_root = matter.parent_id is None
                 edit_matter_rate_ref.current.label = "Client hourly rate (€)" if is_root else "Matter hourly rate (€)"
+                edit_matter_rate_ref.current.visible = is_owner
                 rate_val = getattr(matter, "hourly_rate_euro", None)
                 edit_matter_rate_ref.current.value = str(rate_val) if rate_val is not None else ""
                 edit_matter_rate_ref.current.error_text = None
+            if edit_matter_my_rate_container_ref.current:
+                edit_matter_my_rate_container_ref.current.visible = not is_owner
+            if edit_matter_my_rate_ref.current and not is_owner:
+                try:
+                    users_rates = self.db.get_matter_access_users_with_rates(mid)
+                    my_rate = next((r for uid, _, r in users_rates if uid == cur), None)
+                    edit_matter_my_rate_ref.current.value = str(my_rate) if my_rate is not None else ""
+                    edit_matter_my_rate_ref.current.error_text = None
+                except ValueError:
+                    edit_matter_my_rate_ref.current.value = ""
             if edit_matter_dialog_ref.current:
                 edit_matter_dialog_ref.current.title = ft.Text(f"Edit: {path}")
                 edit_matter_dialog_ref.current.open = True
@@ -1551,29 +1708,57 @@ class SentinelApp:
             if not edit_matter_id_holder or not edit_matter_rate_ref.current:
                 return
             mid = edit_matter_id_holder[0]
-            rate_str = (edit_matter_rate_ref.current.value or "").strip()
-            rate_val = None
-            if rate_str:
-                try:
-                    rate_val = float(rate_str)
-                    if rate_val < 0:
-                        edit_matter_rate_ref.current.error_text = "Rate must be ≥ 0."
+            cur = self.db.current_user_id
+            matters = self.db.get_all_matters()
+            matter = next((m for m in matters if m.id == mid), None)
+            is_owner = matter is not None and cur is not None and matter.owner_id == cur
+            if is_owner:
+                rate_str = (edit_matter_rate_ref.current.value or "").strip()
+                rate_val = None
+                if rate_str:
+                    try:
+                        rate_val = float(rate_str)
+                        if rate_val < 0:
+                            edit_matter_rate_ref.current.error_text = "Rate must be ≥ 0."
+                            page.update()
+                            return
+                    except ValueError:
+                        edit_matter_rate_ref.current.error_text = "Enter a number or leave empty to clear."
                         page.update()
                         return
-                except ValueError:
-                    edit_matter_rate_ref.current.error_text = "Enter a number or leave empty to clear."
-                    page.update()
-                    return
-            try:
-                self.db.update_matter(mid, hourly_rate_euro=rate_val)
-                if edit_matter_dialog_ref.current:
-                    edit_matter_dialog_ref.current.open = False
-                refresh_list()
-                if on_matters_changed:
-                    on_matters_changed()
-                page.snack_bar = ft.SnackBar(ft.Text("Hourly rate updated."), open=True)
-            except ValueError as err:
-                edit_matter_rate_ref.current.error_text = str(err)
+                try:
+                    self.db.update_matter(mid, hourly_rate_euro=rate_val)
+                    if edit_matter_dialog_ref.current:
+                        edit_matter_dialog_ref.current.open = False
+                    refresh_list()
+                    if on_matters_changed:
+                        on_matters_changed()
+                    page.snack_bar = ft.SnackBar(ft.Text("Hourly rate updated."), open=True)
+                except ValueError as err:
+                    edit_matter_rate_ref.current.error_text = str(err)
+            else:
+                my_rate_str = (edit_matter_my_rate_ref.current.value or "").strip() if edit_matter_my_rate_ref.current else ""
+                my_rate_val = None
+                if my_rate_str:
+                    try:
+                        my_rate_val = float(my_rate_str)
+                        if my_rate_val < 0:
+                            edit_matter_my_rate_ref.current.error_text = "Rate must be ≥ 0."
+                            page.update()
+                            return
+                    except ValueError:
+                        edit_matter_my_rate_ref.current.error_text = "Enter a number or leave empty to clear."
+                        page.update()
+                        return
+                try:
+                    self.db.set_user_matter_rate(cur, mid, my_rate_val)
+                    if edit_matter_dialog_ref.current:
+                        edit_matter_dialog_ref.current.open = False
+                    refresh_list()
+                    page.snack_bar = ft.SnackBar(ft.Text("Your rate for this matter updated."), open=True)
+                except ValueError as err:
+                    if edit_matter_my_rate_ref.current:
+                        edit_matter_my_rate_ref.current.error_text = str(err)
             page.update()
     
         def on_edit_matter_cancel(_):
@@ -1587,6 +1772,11 @@ class SentinelApp:
             content=ft.Column(
                 [
                     ft.TextField(ref=edit_matter_rate_ref, label="Hourly rate (€)", width=300, hint_text="Leave empty to clear"),
+                    ft.Container(
+                        ref=edit_matter_my_rate_container_ref,
+                        content=ft.TextField(ref=edit_matter_my_rate_ref, label="My rate for this matter (€)", width=300, hint_text="Override your rate for this matter; leave empty to use matter or default"),
+                        visible=False,
+                    ),
                     ft.Row(
                         [
                             ft.ElevatedButton("Save", on_click=on_edit_matter_save),
@@ -1689,7 +1879,7 @@ class SentinelApp:
             all_entries = [
                 (c, path, code)
                 for c, items in by_client.items()
-                for (_, path, code) in items
+                for (_, path, code, _) in items
             ]
             all_entries.extend((c, c, "") for c in by_client.keys())  # clients as entries too
             q = (e.control.value or "").strip().lower()
@@ -1811,6 +2001,52 @@ class SentinelApp:
                 scroll=ft.ScrollMode.AUTO,
             ),
         )
+        share_dialog = ft.AlertDialog(
+            ref=share_dialog_ref,
+            title=ft.Text("Share matter"),
+            content=ft.Column(
+                [
+                    ft.Container(
+                        content=ft.Column(ref=share_list_ref, scroll=ft.ScrollMode.AUTO),
+                        height=180,
+                        border=ft.border.all(1, ft.Colors.OUTLINE),
+                        border_radius=4,
+                    ),
+                    ft.Row(
+                        [
+                            ft.Dropdown(
+                                ref=share_add_dropdown_ref,
+                                label="Add user",
+                                width=220,
+                                options=[],
+                            ),
+                            ft.ElevatedButton("Add", on_click=on_share_add),
+                        ],
+                        spacing=12,
+                    ),
+                    ft.Row([ft.OutlinedButton("Close", on_click=on_share_close)], spacing=12),
+                ],
+                tight=True,
+                scroll=ft.ScrollMode.AUTO,
+            ),
+        )
+        conflict_dialog = ft.AlertDialog(
+            ref=conflict_dialog_ref,
+            title=ft.Text("Same-name matter"),
+            content=ft.Column(
+                [
+                    ft.Text("Merge their matter into this one, or ask them to rename and try again.", size=12),
+                    ft.Row(
+                        [
+                            ft.ElevatedButton("Merge into this one", on_click=on_conflict_merge),
+                            ft.OutlinedButton("I'll ask them to rename", on_click=on_conflict_skip),
+                        ],
+                        spacing=12,
+                    ),
+                ],
+                tight=True,
+            ),
+        )
         time_entries_dialog = ft.AlertDialog(
             ref=time_entries_dialog_ref,
             title=ft.Text("Time entries"),
@@ -1878,6 +2114,8 @@ class SentinelApp:
         )
         page.overlay.append(move_dialog)
         page.overlay.append(merge_dialog)
+        page.overlay.append(share_dialog)
+        page.overlay.append(conflict_dialog)
         page.overlay.append(edit_matter_dialog)
         page.overlay.append(time_entries_dialog)
         page.overlay.append(edit_entry_dialog)

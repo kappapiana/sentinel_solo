@@ -1,32 +1,34 @@
-# Sentinel Solo (v0.1.2)
+# Sentinel Solo (v0.2.0)
 
-A desktop time-tracking app with a hierarchy of **clients** and **matters** (projects/subprojects). Log time with a timer or by manual entry; view and edit time entries per matter; set **hourly rates** (EUR) for invoicing; move or merge matters with time ported correctly.
+A desktop time-tracking app with a hierarchy of **clients** and **matters** (projects/subprojects). Log time with a timer or by manual entry; view and edit time entries per matter; set **hourly rates** (EUR) for invoicing (including **per-user rates per matter**); move or merge matters with time ported correctly; and **share matters between users**.
 
 **Tech stack:** Python 3.12, [Flet](https://flet.dev/) (GUI), SQLAlchemy. Database: SQLite (default) or PostgreSQL (remote).
 
 ## Features
 
-- **Timer** – **Today’s activities** at the top: list of today’s time entries with editable Matter, Description, Start (hh:mm), End (hh:mm), Duration (H:MM), and **Amount (€)** (duration × applicable hourly rate, color-coded by rate source). Below: searchable matter list (all clients shown, folded by client), optional task description, then Start/Stop or manual entry.
-- **Manual entry** – Same matter selection; enter two of Start time, End time, or Duration; the third is derived. Add the entry to the selected matter.
-- **Manage Matters** – Add clients (roots) and matters (under a client or another matter). **Add form** order: parent (for matters), then name, then **Client hourly rate (€)** or **Matter hourly rate (€)** (optional; leave empty to use default or set later). Per matter menu: **Edit rate…**, **Move**, **Merge**, **Time entries** (list with amount € per entry, edit, add manual). New clients and matters appear in parent and timer lists immediately.
+- **Timer** – **Today’s activities** at the top: list of today’s time entries with editable Matter, Description, Start (hh:mm), End (hh:mm), Duration (H:MM), and **Amount (€)** (duration × applicable hourly rate, color-coded by rate source). Below: searchable matter list (all clients shown, folded by client), optional task description, then **Start/Stop** for live timing or a **Manual** mode that swaps in manual-entry fields.
+- **Manual entry** – Same matter selection; enter two of Start time, End time, or Duration; the third is derived. Add the entry to the selected matter. Manual mode is a distinct view chosen from the Timer tab.
+- **Manage Matters** – Add clients (roots) and matters (under a client or another matter). **Add form** order: parent (for matters), then name, then **Client hourly rate (€)** or **Matter hourly rate (€)** (optional; leave empty to use default or set later). Per matter menu: **Edit rate…**, **Move**, **Merge**, **Time entries** (list with amount € per entry, edit, add manual), and for owners a **Share…** action to share that matter with other users. New clients and matters appear in parent and timer lists immediately.
 - **Reporting** – Time by client and matter with **chargeable amounts (€)**; clients collapsed by default, click to expand; amounts colored by rate source (see **Hourly rates** below).
 - **Timesheet** – Select matters (searchable, folded by client; parent checkbox selects descendants). **Preview** shows entries with duration and Amount (€) by rate source. **Save to folder** and **Export timesheet** to JSON (includes `amount_eur` and `rate_source` per entry); optionally mark exported entries as invoiced.
 
-Matters support unlimited nesting (Client → Project → Subproject…). Time can only be logged on non-root matters (i.e. under a client).
+Matters support unlimited nesting (Client → Project → Subproject…). Time can only be logged on non-root matters (i.e. under a client). A matter is owned by one user but can be **shared** with others; all shared users see each other’s entries on that matter.
 
 ### Hourly rates (EUR)
 
 Every matter and submatter has an **effective hourly rate** used to compute chargeable amounts. Precedence (all amounts in euro):
 
-1. **User default** – Set in **Users** → Edit (your user) → **Default hourly rate (€)**. Used when no client or matter rate is set.
-2. **Client rate** – For a root matter (client), set when adding (Client hourly rate €) or via **Manage Matters** → **Edit rate…**. Used for all matters under that client when they have no own rate.
-3. **Matter rate** – For a non-root matter, set when adding (Matter hourly rate €) or via **Edit rate…**. Submatters without a rate inherit the nearest ancestor’s rate.
+1. **Per-user rate for this matter** – Optional **“My rate for this matter (€)”** override that can be set per user per matter (owners can also set per-user rates for users who have access). When present, this wins over everything else.
+2. **Matter rate** – For a non-root matter, set when adding (Matter hourly rate €) or via **Edit rate…**. Submatters without a rate inherit the nearest ancestor’s rate.
+3. **Client rate** – For a root matter (client), set when adding (Client hourly rate €) or via **Manage Matters** → **Edit rate…**. Used for all matters under that client when they have no own rate.
+4. **User default** – Set in **Users** → Edit (your user) → **Default hourly rate (€)**. Used when no client or matter rate is set for that user.
 
 **Color convention** (wherever chargeable amounts are shown):
 
-- **Red** – User default rate.
-- **Orange** – Rate from an upper-level matter (client or parent matter).
+- **Teal** – Per-user rate for this matter (user–matter override).
 - **Green** – Rate specific to the matter at hand.
+- **Orange** – Rate from an upper-level matter (client or parent matter).
+- **Red** – User default rate.
 
 ## Setup
 
