@@ -15,6 +15,7 @@ _UNSET = object()
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy import inspect, event
+from sqlalchemy.exc import ProgrammingError
 
 from models import Base, Matter, MatterShare, TimeEntry, User, UserMatterRate
 
@@ -363,7 +364,8 @@ class DatabaseManager:
             for table in ("matters", "time_entries", "users"):
                 conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
                 conn.execute(text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY"))
-            # matter_shares and user_matter_rates: create if not exist (Base.metadata.create_all already ran)
+            # matter_shares and user_matter_rates: create if not exist (Base.metadata.create_all already ran).
+            # These helper tables do not use RLS to avoid recursive policies with matters; access is enforced in code.
             for stmt in (
                 """
                 CREATE TABLE IF NOT EXISTS matter_shares (
@@ -382,9 +384,6 @@ class DatabaseManager:
                 """,
             ):
                 conn.execute(text(stmt))
-            for table in ("matter_shares", "user_matter_rates"):
-                conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
-                conn.execute(text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY"))
             # matters: owner for write; owner or shared or admin for read
             conn.execute(
                 text(
@@ -502,114 +501,20 @@ class DatabaseManager:
                     """
                 )
             )
-            # matter_shares: shared user can SELECT; matter owner can INSERT/DELETE
-            conn.execute(
-                text(
-                    """
-                    DROP POLICY IF EXISTS matter_shares_select ON matter_shares;
-                    CREATE POLICY matter_shares_select ON matter_shares FOR SELECT
-                    USING (user_id::text = current_setting('app.current_user_id', true))
-                    """
-                )
-            )
-            conn.execute(
-                text(
-                    """
-                    DROP POLICY IF EXISTS matter_shares_owner_select ON matter_shares;
-                    CREATE POLICY matter_shares_owner_select ON matter_shares FOR SELECT
-                    USING (
-                        EXISTS (
-                            SELECT 1 FROM matters m
-                            WHERE m.id = matter_id AND m.owner_id::text = current_setting('app.current_user_id', true)
-                        )
-                    )
-                    """
-                )
-            )
-            conn.execute(
-                text(
-                    """
-                    DROP POLICY IF EXISTS matter_shares_insert ON matter_shares;
-                    CREATE POLICY matter_shares_insert ON matter_shares FOR INSERT
-                    WITH CHECK (
-                        EXISTS (
-                            SELECT 1 FROM matters m
-                            WHERE m.id = matter_id AND m.owner_id::text = current_setting('app.current_user_id', true)
-                        )
-                    )
-                    """
-                )
-            )
-            conn.execute(
-                text(
-                    """
-                    DROP POLICY IF EXISTS matter_shares_delete ON matter_shares;
-                    CREATE POLICY matter_shares_delete ON matter_shares FOR DELETE
-                    USING (
-                        EXISTS (
-                            SELECT 1 FROM matters m
-                            WHERE m.id = matter_id AND m.owner_id::text = current_setting('app.current_user_id', true)
-                        )
-                    )
-                    """
-                )
-            )
-            conn.execute(
-                text(
-                    """
-                    DROP POLICY IF EXISTS matter_shares_admin_select ON matter_shares;
-                    CREATE POLICY matter_shares_admin_select ON matter_shares FOR SELECT
-                    USING (app.current_user_is_admin())
-                    """
-                )
-            )
-            conn.execute(
-                text(
-                    """
-                    DROP POLICY IF EXISTS user_matter_rates_admin_select ON user_matter_rates;
-                    CREATE POLICY user_matter_rates_admin_select ON user_matter_rates FOR SELECT
-                    USING (app.current_user_is_admin())
-                    """
-                )
-            )
-            # user_matter_rates: see own or for matters one owns; insert/update/delete own or as matter owner
-            conn.execute(
-                text(
-                    """
-                    DROP POLICY IF EXISTS user_matter_rates_select ON user_matter_rates;
-                    CREATE POLICY user_matter_rates_select ON user_matter_rates FOR SELECT
-                    USING (
-                        user_id::text = current_setting('app.current_user_id', true)
-                        OR EXISTS (
-                            SELECT 1 FROM matters m
-                            WHERE m.id = matter_id AND m.owner_id::text = current_setting('app.current_user_id', true)
-                        )
-                    )
-                    """
-                )
-            )
-            conn.execute(
-                text(
-                    """
-                    DROP POLICY IF EXISTS user_matter_rates_all ON user_matter_rates;
-                    CREATE POLICY user_matter_rates_all ON user_matter_rates FOR ALL
-                    USING (
-                        user_id::text = current_setting('app.current_user_id', true)
-                        OR EXISTS (
-                            SELECT 1 FROM matters m
-                            WHERE m.id = matter_id AND m.owner_id::text = current_setting('app.current_user_id', true)
-                        )
-                    )
-                    WITH CHECK (
-                        user_id::text = current_setting('app.current_user_id', true)
-                        OR EXISTS (
-                            SELECT 1 FROM matters m
-                            WHERE m.id = matter_id AND m.owner_id::text = current_setting('app.current_user_id', true)
-                        )
-                    )
-                    """
-                )
-            )
+            # Ensure helper tables have no RLS policies enabled (to avoid recursive dependencies with matters).
+            for stmt in (
+                "DROP POLICY IF EXISTS matter_shares_select ON matter_shares",
+                "DROP POLICY IF EXISTS matter_shares_owner_select ON matter_shares",
+                "DROP POLICY IF EXISTS matter_shares_insert ON matter_shares",
+                "DROP POLICY IF EXISTS matter_shares_delete ON matter_shares",
+                "DROP POLICY IF EXISTS matter_shares_admin_select ON matter_shares",
+                "DROP POLICY IF EXISTS user_matter_rates_select ON user_matter_rates",
+                "DROP POLICY IF EXISTS user_matter_rates_all ON user_matter_rates",
+                "DROP POLICY IF EXISTS user_matter_rates_admin_select ON user_matter_rates",
+            ):
+                conn.execute(text(stmt))
+            for table in ("matter_shares", "user_matter_rates"):
+                conn.execute(text(f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY"))
             conn.execute(
                 text(
                     """
@@ -1672,10 +1577,26 @@ class DatabaseManager:
         self._require_user()
         if self._engine.dialect.name == "postgresql":
             with self._session() as session:
-                rows = session.execute(
-                    text("SELECT id, username FROM app.list_users_for_share(:cid)"),
-                    {"cid": self._current_user_id},
-                ).fetchall()
+                try:
+                    rows = session.execute(
+                        text("SELECT id, username FROM app.list_users_for_share(:cid)"),
+                        {"cid": self._current_user_id},
+                    ).fetchall()
+                except ProgrammingError as exc:
+                    # Older Postgres deployments may not have app.list_users_for_share yet.
+                    # Only fall back (and recover the transaction) when that specific
+                    # function is missing; otherwise re-raise.
+                    if "list_users_for_share" not in str(exc):
+                        raise
+                    # Clear the failed transaction before issuing another statement.
+                    session.rollback()
+                    rows = session.execute(
+                        text(
+                            "SELECT id, username, password_hash, is_admin, default_hourly_rate_euro "
+                            "FROM app.list_users(:id)"
+                        ),
+                        {"id": self._current_user_id},
+                    ).fetchall()
                 return [(r[0], r[1]) for r in rows if r[0] != self._current_user_id]
         with self._session() as session:
             users = session.query(User).filter(User.id != self._current_user_id).order_by(User.username).all()
@@ -1727,14 +1648,23 @@ class DatabaseManager:
         self._require_user()
         with self._session() as session:
             if self._engine.dialect.name == "postgresql":
-                rows = session.execute(
-                    text("SELECT matter_id, path FROM app.get_owned_matter_paths(:uid)"),
-                    {"uid": user_id},
-                ).fetchall()
+                try:
+                    rows = session.execute(
+                        text("SELECT matter_id, path FROM app.get_owned_matter_paths(:uid)"),
+                        {"uid": user_id},
+                    ).fetchall()
+                except ProgrammingError as exc:
+                    # Older Postgres deployments may not have app.get_owned_matter_paths yet.
+                    # If some other error occurs, re-raise it.
+                    if "get_owned_matter_paths" not in str(exc):
+                        raise
+                    # Clear failed transaction before falling back to ORM-based lookup.
+                    session.rollback()
+                    rows = []
                 for r in rows:
                     if r[1] == full_path:
                         return (r[0], r[1])
-                return None
+                # If function is missing or no match found, fall back to ORM path computation below.
             matters = (
                 session.query(Matter).filter(Matter.owner_id == user_id).all()
             )
