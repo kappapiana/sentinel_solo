@@ -644,9 +644,21 @@ class SentinelApp:
                     width=90,
                     on_click=lambda e, eid=entry_id: _on_continue_task(eid),
                 )
+                menu_btn = ft.PopupMenuButton(
+                    items=[
+                        ft.PopupMenuItem(
+                            content="Delete this entry…",
+                            on_click=lambda e, eid=entry_id: open_activity_delete_dialog(eid),
+                        ),
+                        ft.PopupMenuItem(
+                            content="Change date…",
+                            on_click=lambda e, eid=entry_id: open_activity_change_date_dialog(eid),
+                        ),
+                    ]
+                )
                 rows.append(
                     ft.Row(
-                        [matter_dd, desc_tf, start_tf, end_tf, duration_tf, amount_text, continue_btn],
+                        [matter_dd, desc_tf, start_tf, end_tf, duration_tf, amount_text, continue_btn, menu_btn],
                         spacing=12,
                         alignment=ft.MainAxisAlignment.START,
                     )
@@ -663,6 +675,7 @@ class SentinelApp:
                     ft.Text("Duration", size=12, weight=ft.FontWeight.W_500, width=100),
                     ft.Text("Amount (€)", size=12, weight=ft.FontWeight.W_500, width=90),
                     ft.Container(width=90),
+                    ft.Container(width=32),
                 ],
                 spacing=12,
             )
@@ -674,6 +687,121 @@ class SentinelApp:
                 page.update()
 
         page.data["refresh_timer_activities"] = refresh_activities
+
+        def open_activity_delete_dialog(entry_id: int) -> None:
+            """Ask confirmation, then delete the entry and refresh Today's activities."""
+
+            def on_confirm(_):
+                try:
+                    self.db.delete_time_entry(entry_id)
+                    page.snack_bar = ft.SnackBar(ft.Text("Entry deleted."), open=True)
+                except ValueError as err:
+                    page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                if page.dialog:
+                    page.dialog.open = False
+                refresh_activities()
+                page.update()
+
+            def on_cancel(_):
+                if page.dialog:
+                    page.dialog.open = False
+                page.update()
+
+            page.dialog = ft.AlertDialog(
+                title=ft.Text("Delete time entry"),
+                content=ft.Text(
+                    "Are you sure you want to delete this time entry? This cannot be undone.",
+                    size=12,
+                ),
+                actions=[
+                    ft.TextButton("Delete", on_click=on_confirm),
+                    ft.TextButton("Cancel", on_click=on_cancel),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            page.dialog.open = True
+            page.update()
+
+        def open_activity_change_date_dialog(entry_id: int) -> None:
+            """Allow changing only the calendar day for a time entry (time of day preserved)."""
+            # Only look in today's entries (this menu is only shown there)
+            entries_today = self.db.get_time_entries_for_day(today)
+            entry = next((x for x in entries_today if x.id == entry_id), None)
+            if not entry:
+                page.snack_bar = ft.SnackBar(ft.Text("Time entry not found."), open=True)
+                page.update()
+                return
+            if entry.end_time is None:
+                page.snack_bar = ft.SnackBar(
+                    ft.Text("Stop the timer for this entry before changing its date."),
+                    open=True,
+                )
+                page.update()
+                return
+
+            date_field = ft.TextField(
+                label="New date (YYYY-MM-DD)",
+                width=200,
+                value=entry.start_time.date().isoformat(),
+            )
+
+            def on_save(_):
+                raw = (date_field.value or "").strip()
+                try:
+                    new_date = datetime.strptime(raw, "%Y-%m-%d").date()
+                except ValueError:
+                    page.snack_bar = ft.SnackBar(
+                        ft.Text("Invalid date. Use YYYY-MM-DD."), open=True
+                    )
+                    page.update()
+                    return
+
+                start_t = entry.start_time.time()
+                end_t = entry.end_time.time() if entry.end_time else None
+                new_start = datetime.combine(new_date, start_t)
+                kwargs: dict = {
+                    "start_time": new_start,
+                    "duration_seconds": entry.duration_seconds or 0.0,
+                }
+                if end_t is not None:
+                    new_end = datetime.combine(new_date, end_t)
+                    kwargs["end_time"] = new_end
+                try:
+                    self.db.update_time_entry(entry_id, **kwargs)
+                    page.snack_bar = ft.SnackBar(ft.Text("Date updated."), open=True)
+                except ValueError as err:
+                    page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                if page.dialog:
+                    page.dialog.open = False
+                refresh_activities()
+                page.update()
+
+            def on_cancel(_):
+                if page.dialog:
+                    page.dialog.open = False
+                page.update()
+
+            page.dialog = ft.AlertDialog(
+                title=ft.Text("Change entry date"),
+                content=ft.Column(
+                    [
+                        ft.Text(
+                            "Change the calendar day of this entry. Start and end times stay the same.",
+                            size=12,
+                            width=360,
+                        ),
+                        date_field,
+                    ],
+                    tight=True,
+                ),
+                actions=[
+                    ft.TextButton("Save", on_click=on_save),
+                    ft.TextButton("Cancel", on_click=on_cancel),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            page.dialog.open = True
+            page.update()
 
         entries_today = self.db.get_time_entries_for_day(today)
         initial_activities_controls: list[ft.Control] = (
@@ -1059,7 +1187,7 @@ class SentinelApp:
     
         time_entries_matter_id: list = [None]
         time_entries_path: list = [None]
-        time_entries_list_ref = ft.Ref[ft.Column]()
+        time_entries_list_ref = ft.Ref[ft.ListView]()
         time_entries_dialog_ref = ft.Ref[ft.AlertDialog]()
         edit_entry_id_ref: list = [None]
         edit_desc_ref = ft.Ref[ft.TextField]()
@@ -1534,7 +1662,8 @@ class SentinelApp:
 
                 controls.append(
                     ft.ListTile(
-                        title=ft.Text(desc or "(no description)", size=14),
+                        width=560,
+                        title=ft.Text(desc or "(no description)", size=14, no_wrap=True),
                         subtitle=ft.Row(
                             [
                                 ft.Text(f"{format_datetime(entry.start_time)} → {end_str}  ·  {dur_str}", size=12),
@@ -2053,8 +2182,12 @@ class SentinelApp:
             content=ft.Column(
                 [
                     ft.Container(
-                        content=ft.Column(ref=time_entries_list_ref, scroll=ft.ScrollMode.AUTO),
+                        content=ft.ListView(
+                            ref=time_entries_list_ref,
+                            expand=True,
+                        ),
                         height=280,
+                        width=600,
                         border=ft.border.all(1, ft.Colors.OUTLINE),
                         border_radius=4,
                     ),
