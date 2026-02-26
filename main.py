@@ -490,10 +490,20 @@ class SentinelApp:
         page.data["refresh_timer_matters"] = refresh_timer_matter_list
 
         today = date.today()
+        selected_day: list[date] = [today]
         activities_list_ref = ft.Ref[ft.Column]()
+        day_field_ref = ft.Ref[ft.TextField]()
+        activities_title_ref = ft.Ref[ft.Text]()
+        date_picker_ref = ft.Ref[ft.DatePicker]()
+
+        def _label_for_selected_day() -> str:
+            """Return header label for the currently selected day."""
+            if selected_day[0] == date.today():
+                return "Today's activities"
+            return f"Activities for {selected_day[0].isoformat()}"
 
         def _build_activities_rows() -> list[ft.Control]:
-            entries = self.db.get_time_entries_for_day(today)
+            entries = self.db.get_time_entries_for_day(selected_day[0])
             path_options = self.db.get_matters_with_full_paths(for_timer=True)
             path_by_id = {mid: path for mid, path in path_options}
 
@@ -547,7 +557,7 @@ class SentinelApp:
                     page.update()
 
                 def _on_activity_start_blur(eid: int, s: str):
-                    entry = next((x for x in self.db.get_time_entries_for_day(today) if x.id == eid), None)
+                    entry = next((x for x in self.db.get_time_entries_for_day(selected_day[0]) if x.id == eid), None)
                     if not entry:
                         return
                     t = parse_time(s or "")
@@ -573,7 +583,7 @@ class SentinelApp:
                     page.update()
 
                 def _on_activity_end_blur(eid: int, s: str):
-                    entry = next((x for x in self.db.get_time_entries_for_day(today) if x.id == eid), None)
+                    entry = next((x for x in self.db.get_time_entries_for_day(selected_day[0]) if x.id == eid), None)
                     if not entry:
                         return
                     if (s or "").strip() in ("", "—", "Running"):
@@ -604,7 +614,7 @@ class SentinelApp:
                     page.update()
 
                 def _on_activity_duration_blur(eid: int, s: str):
-                    entry = next((x for x in self.db.get_time_entries_for_day(today) if x.id == eid), None)
+                    entry = next((x for x in self.db.get_time_entries_for_day(selected_day[0]) if x.id == eid), None)
                     if not entry:
                         return
                     hours = parse_duration_hours(s or "")
@@ -665,7 +675,7 @@ class SentinelApp:
                 )
 
             if not rows:
-                return [ft.Text("No activities recorded today. Start the timer or add a manual entry below.", size=14)]
+                return [ft.Text("No activities recorded for this day. Start the timer or add a manual entry below.", size=14)]
             header = ft.Row(
                 [
                     ft.Text("Matter", size=12, weight=ft.FontWeight.W_500, width=320),
@@ -685,6 +695,27 @@ class SentinelApp:
             if activities_list_ref.current:
                 activities_list_ref.current.controls = _build_activities_rows()
                 page.update()
+
+        def _set_selected_day(new_day: date) -> None:
+            """Update selected_day state, header label, field, and refresh list."""
+            selected_day[0] = new_day
+            if day_field_ref.current:
+                day_field_ref.current.value = new_day.isoformat()
+            if activities_title_ref.current:
+                activities_title_ref.current.value = _label_for_selected_day()
+            refresh_activities()
+
+        def _on_day_picker_change(e):
+            """Handle date selection from the DatePicker."""
+            picker = date_picker_ref.current or getattr(e, "control", None)
+            new_val = getattr(picker, "value", None)
+            new_day: date | None = None
+            if isinstance(new_val, datetime):
+                new_day = new_val.date()
+            elif isinstance(new_val, date):
+                new_day = new_val
+            if new_day is not None:
+                _set_selected_day(new_day)
 
         page.data["refresh_timer_activities"] = refresh_activities
 
@@ -724,9 +755,9 @@ class SentinelApp:
 
         def open_activity_change_date_dialog(entry_id: int) -> None:
             """Allow changing only the calendar day for a time entry (time of day preserved)."""
-            # Only look in today's entries (this menu is only shown there)
-            entries_today = self.db.get_time_entries_for_day(today)
-            entry = next((x for x in entries_today if x.id == entry_id), None)
+            # Only look in entries for the currently selected day (this menu is only shown there)
+            entries_for_day = self.db.get_time_entries_for_day(selected_day[0])
+            entry = next((x for x in entries_for_day if x.id == entry_id), None)
             if not entry:
                 page.snack_bar = ft.SnackBar(ft.Text("Time entry not found."), open=True)
                 page.update()
@@ -803,10 +834,7 @@ class SentinelApp:
             page.dialog.open = True
             page.update()
 
-        entries_today = self.db.get_time_entries_for_day(today)
-        initial_activities_controls: list[ft.Control] = (
-            _build_activities_rows() if entries_today else [ft.Text("No activities recorded today. Start the timer or add a manual entry below.", size=14)]
-        )
+        initial_activities_controls: list[ft.Control] = _build_activities_rows()
         activities_list_column = ft.Column(
             ref=activities_list_ref,
             controls=initial_activities_controls,
@@ -817,10 +845,62 @@ class SentinelApp:
             height=240,
         )
 
+        # Date picker for selecting arbitrary day in Timer tab
+        date_picker = ft.DatePicker(on_change=_on_day_picker_change)
+        date_picker_ref.current = date_picker
+        page.overlay.append(date_picker)
+
+        activities_title = ft.Text(
+            ref=activities_title_ref,
+            value=_label_for_selected_day(),
+            size=18,
+            weight=ft.FontWeight.W_500,
+        )
+        day_selector_row = ft.Row(
+            [
+                ft.TextField(
+                    ref=day_field_ref,
+                    label="Day (YYYY-MM-DD)",
+                    width=180,
+                    value=selected_day[0].isoformat(),
+                    on_submit=lambda e: _set_selected_day(
+                        datetime.strptime((e.control.value or "").strip(), "%Y-%m-%d").date()
+                    )
+                    if (e.control.value or "").strip()
+                    else None,
+                    on_blur=lambda e: (
+                        _set_selected_day(
+                            datetime.strptime((e.control.value or "").strip(), "%Y-%m-%d").date()
+                        )
+                        if (e.control.value or "").strip()
+                        else None
+                    ),
+                ),
+                ft.IconButton(
+                    icon=ft.Icons.CALENDAR_MONTH,
+                    tooltip="Pick a day",
+                    on_click=lambda e: (
+                        setattr(date_picker_ref.current, "open", True)
+                        or page.update()
+                    )
+                    if date_picker_ref.current
+                    else None,
+                ),
+                ft.TextButton(
+                    "Today",
+                    on_click=lambda e: _set_selected_day(date.today()),
+                ),
+            ],
+            spacing=8,
+            alignment=ft.MainAxisAlignment.START,
+        )
+
         activities_section = ft.Container(
             content=ft.Column(
                 [
-                    ft.Text("Today's activities", size=18, weight=ft.FontWeight.W_500),
+                    activities_title,
+                    ft.Container(height=4),
+                    day_selector_row,
                     ft.Container(height=6),
                     activities_list_container,
                 ],
@@ -2666,6 +2746,16 @@ class SentinelApp:
                 page.data["reporting_sort"] = val
                 refresh_timesheet_list()
 
+        def _on_timesheet_clear_selection(_):
+            """Clear all selected matters in the timesheet tab."""
+            nonlocal timesheet_selected_ids
+            timesheet_selected_ids.clear()
+            if timesheet_list_ref.current:
+                timesheet_list_ref.current.controls = _build_timesheet_list_controls(
+                    timesheet_search_ref.current.value if timesheet_search_ref.current else ""
+                )
+            page.update()
+
         def _show_mark_invoiced_dialog(out_path: Path, entry_ids: list):
             def _on_mark_yes(_):
                 self.db.mark_entries_invoiced(entry_ids)
@@ -2825,6 +2915,10 @@ class SentinelApp:
                 ft.Row(
                     [
                         ft.Text("Matters", size=16, weight=ft.FontWeight.W_500),
+                        ft.TextButton(
+                            "Unselect all",
+                            on_click=_on_timesheet_clear_selection,
+                        ),
                         ft.Dropdown(
                             label="Sort clients by",
                             width=280,
