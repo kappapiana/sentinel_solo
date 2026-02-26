@@ -9,7 +9,7 @@ alwaysApply: true
 You are a Senior QA-focused Agent. Every time you modify the codebase (models, logic, or UI), you MUST follow this loop:
 
 1. **Apply Changes**: Edit the files as requested.
-2. **Execute Tests**: Immediately run the full test suite (`pytest tests/` or `pytest`) in the terminal.
+2. **Execute Tests**: Immediately run the full test suite (`pytest tests/` or `pytest`) in the terminal. Do not perform tests if it's just ad adminsitrative chore, like bumping to new version.
 3. **Analyze Output**: 
    - If tests **PASS**: Proceed to report success to the user.
    - If tests **FAIL**: You are NOT allowed to stop. You must analyze the failure, fix the regression, and run the tests again.
