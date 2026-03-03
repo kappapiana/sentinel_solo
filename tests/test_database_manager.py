@@ -499,6 +499,108 @@ class TestDeleteTimeEntry:
             db_user2.delete_time_entry(entry.id)
 
 
+# --- matter budget ---
+
+
+class TestMatterBudget:
+    """get_matter_budget_usage and get_matter_budget_status."""
+
+    def test_no_budget_returns_near_over_false(self, db_user1: DatabaseManager):
+        """When budget_eur is None, near_budget and over_budget are False."""
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        total, budget_eur, threshold = db_user1.get_matter_budget_usage(project.id)
+        assert budget_eur is None
+        status = db_user1.get_matter_budget_status(project.id)
+        assert status["near_budget"] is False
+        assert status["over_budget"] is False
+
+    def test_budget_under_threshold(self, db_user1: DatabaseManager):
+        """Budget set, entries under 80% → near_budget False, over_budget False."""
+        today = date.today()
+        start = datetime.combine(today, datetime.min.time().replace(hour=9, minute=0))
+        db_user1.update_user(db_user1.current_user_id, default_hourly_rate_euro=100.0)
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        db_user1.update_matter(project.id, budget_eur=1000.0)
+        # 1h at 100€/h = 100€ (10%)
+        end = start + timedelta(hours=1)
+        db_user1.add_manual_time_entry(project.id, "Work", start_time=start, end_time=end)
+        status = db_user1.get_matter_budget_status(project.id)
+        assert status["total_eur"] == 100.0
+        assert status["budget_eur"] == 1000.0
+        assert status["ratio"] == 0.1
+        assert status["near_budget"] is False
+        assert status["over_budget"] is False
+
+    def test_budget_near_threshold(self, db_user1: DatabaseManager):
+        """Budget set, entries at 80–99% → near_budget True, over_budget False."""
+        today = date.today()
+        start = datetime.combine(today, datetime.min.time().replace(hour=9, minute=0))
+        db_user1.update_user(db_user1.current_user_id, default_hourly_rate_euro=100.0)
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        db_user1.update_matter(project.id, budget_eur=1000.0)
+        # 8.5h at 100€/h = 850€ (85%)
+        end = start + timedelta(hours=8, minutes=30)
+        db_user1.add_manual_time_entry(project.id, "Work", start_time=start, end_time=end)
+        status = db_user1.get_matter_budget_status(project.id)
+        assert status["total_eur"] == 850.0
+        assert status["budget_eur"] == 1000.0
+        assert status["near_budget"] is True
+        assert status["over_budget"] is False
+
+    def test_budget_over(self, db_user1: DatabaseManager):
+        """Budget set, entries over 100% → over_budget True."""
+        today = date.today()
+        start = datetime.combine(today, datetime.min.time().replace(hour=9, minute=0))
+        db_user1.update_user(db_user1.current_user_id, default_hourly_rate_euro=100.0)
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        db_user1.update_matter(project.id, budget_eur=1000.0)
+        # 12h at 100€/h = 1200€
+        end = start + timedelta(hours=12)
+        db_user1.add_manual_time_entry(project.id, "Work", start_time=start, end_time=end)
+        status = db_user1.get_matter_budget_status(project.id)
+        assert status["total_eur"] == 1200.0
+        assert status["budget_eur"] == 1000.0
+        assert status["over_budget"] is True
+
+    def test_budget_respects_matter_rate(self, db_user1: DatabaseManager):
+        """Budget usage uses matter hourly rate when set (not user default)."""
+        today = date.today()
+        start = datetime.combine(today, datetime.min.time().replace(hour=9, minute=0))
+        db_user1.update_user(db_user1.current_user_id, default_hourly_rate_euro=50.0)
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        db_user1.update_matter(project.id, hourly_rate_euro=200.0, budget_eur=500.0)
+        # 2h at 200€/h = 400€ (80% of 500)
+        end = start + timedelta(hours=2)
+        db_user1.add_manual_time_entry(project.id, "Work", start_time=start, end_time=end)
+        status = db_user1.get_matter_budget_status(project.id)
+        assert status["total_eur"] == 400.0
+        assert status["near_budget"] is True
+
+    def test_budget_sums_all_users_entries(self, db_user1: DatabaseManager, db_user2: DatabaseManager):
+        """Budget usage includes time from all users who logged to the matter."""
+        today = date.today()
+        start = datetime.combine(today, datetime.min.time().replace(hour=9, minute=0))
+        db_user1.update_user(db_user1.current_user_id, default_hourly_rate_euro=100.0)
+        db_user2.update_user(db_user2.current_user_id, default_hourly_rate_euro=100.0)
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        db_user1.add_matter_share(project.id, db_user2.current_user_id)
+        db_user1.update_matter(project.id, budget_eur=500.0)
+        # User1: 2h, User2: 2h → 400€ total (80%)
+        end1 = start + timedelta(hours=2)
+        end2 = start + timedelta(hours=4)
+        db_user1.add_manual_time_entry(project.id, "U1", start_time=start, end_time=end1)
+        db_user2.add_manual_time_entry(project.id, "U2", start_time=end1, end_time=end2)
+        status = db_user1.get_matter_budget_status(project.id)
+        assert status["total_eur"] == 400.0
+        assert status["near_budget"] is True
+
+
 # --- backup / restore ---
 
 

@@ -495,6 +495,8 @@ class SentinelApp:
         day_field_ref = ft.Ref[ft.TextField]()
         activities_title_ref = ft.Ref[ft.Text]()
         date_picker_ref = ft.Ref[ft.DatePicker]()
+        change_date_field_ref = ft.Ref[ft.TextField]()
+        change_date_picker_ref = ft.Ref[ft.DatePicker]()
 
         def _label_for_selected_day() -> str:
             """Return header label for the currently selected day."""
@@ -654,21 +656,35 @@ class SentinelApp:
                     width=90,
                     on_click=lambda e, eid=entry_id: _on_continue_task(eid),
                 )
-                menu_btn = ft.PopupMenuButton(
-                    items=[
-                        ft.PopupMenuItem(
-                            content="Delete this entry…",
-                            on_click=lambda e, eid=entry_id: open_activity_delete_dialog(eid),
-                        ),
-                        ft.PopupMenuItem(
-                            content="Change date…",
-                            on_click=lambda e, eid=entry_id: open_activity_change_date_dialog(eid),
-                        ),
-                    ]
+                delete_btn = ft.IconButton(
+                    icon=ft.Icons.DELETE_OUTLINE,
+                    tooltip="Delete this entry…",
+                    icon_size=18,
+                    on_click=lambda e, eid=entry_id: open_activity_delete_dialog(eid),
+                )
+                change_date_btn = ft.IconButton(
+                    icon=ft.Icons.EVENT,
+                    tooltip="Change date…",
+                    icon_size=18,
+                    on_click=lambda e, eid=entry_id: open_activity_change_date_dialog(eid),
                 )
                 rows.append(
                     ft.Row(
-                        [matter_dd, desc_tf, start_tf, end_tf, duration_tf, amount_text, continue_btn, menu_btn],
+                        [
+                            matter_dd,
+                            desc_tf,
+                            start_tf,
+                            end_tf,
+                            duration_tf,
+                            amount_text,
+                            continue_btn,
+                            ft.Row(
+                                [change_date_btn, delete_btn],
+                                spacing=4,
+                                alignment=ft.MainAxisAlignment.END,
+                                width=64,
+                            ),
+                        ],
                         spacing=12,
                         alignment=ft.MainAxisAlignment.START,
                     )
@@ -685,7 +701,7 @@ class SentinelApp:
                     ft.Text("Duration", size=12, weight=ft.FontWeight.W_500, width=100),
                     ft.Text("Amount (€)", size=12, weight=ft.FontWeight.W_500, width=90),
                     ft.Container(width=90),
-                    ft.Container(width=32),
+                    ft.Text("Actions", size=12, weight=ft.FontWeight.W_500, width=64),
                 ],
                 spacing=12,
             )
@@ -716,6 +732,19 @@ class SentinelApp:
                 new_day = new_val
             if new_day is not None:
                 _set_selected_day(new_day)
+
+        def _on_change_date_picker_change(e):
+            """Update the change-date dialog field when picking a date from the mini calendar."""
+            picker = change_date_picker_ref.current or getattr(e, "control", None)
+            new_val = getattr(picker, "value", None)
+            new_day: date | None = None
+            if isinstance(new_val, datetime):
+                new_day = new_val.date()
+            elif isinstance(new_val, date):
+                new_day = new_val
+            if new_day is not None and change_date_field_ref.current:
+                change_date_field_ref.current.value = new_day.isoformat()
+                page.update()
 
         page.data["refresh_timer_activities"] = refresh_activities
 
@@ -771,6 +800,7 @@ class SentinelApp:
                 return
 
             date_field = ft.TextField(
+                ref=change_date_field_ref,
                 label="New date (YYYY-MM-DD)",
                 width=200,
                 value=entry.start_time.date().isoformat(),
@@ -821,7 +851,23 @@ class SentinelApp:
                             size=12,
                             width=360,
                         ),
-                        date_field,
+                        ft.Row(
+                            [
+                                date_field,
+                                ft.IconButton(
+                                    icon=ft.Icons.CALENDAR_MONTH,
+                                    tooltip="Pick a new day",
+                                    on_click=lambda e: (
+                                        setattr(change_date_picker_ref.current, "open", True)
+                                        or page.update()
+                                    )
+                                    if change_date_picker_ref.current
+                                    else None,
+                                ),
+                            ],
+                            spacing=8,
+                            alignment=ft.MainAxisAlignment.START,
+                        ),
                     ],
                     tight=True,
                 ),
@@ -845,10 +891,15 @@ class SentinelApp:
             height=240,
         )
 
-        # Date picker for selecting arbitrary day in Timer tab
+        # Date pickers:
+        # - date_picker: select day for the activities list
+        # - change_date_picker: select a new day for a specific entry in the Change date dialog
         date_picker = ft.DatePicker(on_change=_on_day_picker_change)
         date_picker_ref.current = date_picker
+        change_date_picker = ft.DatePicker(on_change=_on_change_date_picker_change)
+        change_date_picker_ref.current = change_date_picker
         page.overlay.append(date_picker)
+        page.overlay.append(change_date_picker)
 
         activities_title = ft.Text(
             ref=activities_title_ref,
@@ -949,6 +1000,30 @@ class SentinelApp:
             """Return selected matter id from the matter list (same for timer and manual)."""
             return timer_matter_selected[0]
 
+        def _show_budget_snack_if_needed(matter_id: int | None) -> bool:
+            """Show snack bar when matter budget is near or over threshold. Returns True if shown."""
+            if matter_id is None:
+                return False
+            status = self.db.get_matter_budget_status(matter_id)
+            if status.get("budget_eur") is None or status["budget_eur"] <= 0:
+                return False
+            total = status["total_eur"]
+            budget = status["budget_eur"]
+            pct = int((status.get("ratio") or 0) * 100)
+            if status.get("over_budget"):
+                page.snack_bar = ft.SnackBar(
+                    ft.Text(f"Budget exceeded for this matter: {format_eur(total)} of {format_eur(budget)} logged."),
+                    open=True,
+                )
+                return True
+            if status.get("near_budget"):
+                page.snack_bar = ft.SnackBar(
+                    ft.Text(f"Warning: budget for this matter is at {pct}% ({format_eur(total)} of {format_eur(budget)})."),
+                    open=True,
+                )
+                return True
+            return False
+
         def on_start(_):
             matter_id = _get_selected_matter_id()
             if matter_id is None:
@@ -972,6 +1047,7 @@ class SentinelApp:
             if start_time_field_ref.current:
                 start_time_field_ref.current.value = format_datetime(start_time_ref[0])
             page.run_task(timer_loop)
+            _show_budget_snack_if_needed(matter_id)
             page.update()
 
         def on_apply_start_time(_):
@@ -1016,6 +1092,8 @@ class SentinelApp:
             refresh = page.data.get("refresh_timer_activities")
             if callable(refresh):
                 refresh()
+            if entry:
+                _show_budget_snack_if_needed(entry.matter_id)
             page.update()
 
         def _update_manual_derived(_=None):
@@ -1065,7 +1143,8 @@ class SentinelApp:
             refresh = page.data.get("refresh_timer_activities")
             if callable(refresh):
                 refresh()
-            page.snack_bar = ft.SnackBar(ft.Text("Manual entry added to selected matter."), open=True)
+            if not _show_budget_snack_if_needed(matter_id):
+                page.snack_bar = ft.SnackBar(ft.Text("Manual entry added to selected matter."), open=True)
             page.update()
 
         start_btn.on_click = on_start
@@ -1316,6 +1395,24 @@ class SentinelApp:
                 menu_items_builder = []
                 for mid, path, code, is_owner in items:
                     display_path = path if is_owner else f"{path} (shared)"
+                    budget_status = self.db.get_matter_budget_status(mid)
+                    leading_icon = None
+                    if budget_status.get("budget_eur") is not None and budget_status["budget_eur"] > 0:
+                        total = budget_status["total_eur"]
+                        budget = budget_status["budget_eur"]
+                        pct = int((budget_status.get("ratio") or 0) * 100)
+                        if budget_status.get("over_budget"):
+                            tooltip = f"Budget: {format_eur(budget)}, used: {format_eur(total)} ({pct}%) – over budget"
+                            leading_icon = ft.Tooltip(
+                                message=tooltip,
+                                content=ft.Icon(ft.Icons.WARNING, color=ft.Colors.RED, size=18),
+                            )
+                        elif budget_status.get("near_budget"):
+                            tooltip = f"Budget: {format_eur(budget)}, used: {format_eur(total)} ({pct}%) – near budget"
+                            leading_icon = ft.Tooltip(
+                                message=tooltip,
+                                content=ft.Icon(ft.Icons.WARNING_AMBER, color=ft.Colors.ORANGE, size=18),
+                            )
                     items_list = [
                         ft.PopupMenuItem(
                             content="Edit rate…",
@@ -1344,6 +1441,7 @@ class SentinelApp:
                         )
                     menu_items_builder.append(
                         ft.ListTile(
+                            leading=leading_icon,
                             title=ft.Text(display_path, size=14),
                             subtitle=ft.Text(code, size=12),
                             trailing=ft.PopupMenuButton(
@@ -1880,6 +1978,9 @@ class SentinelApp:
         edit_matter_rate_ref = ft.Ref[ft.TextField]()
         edit_matter_my_rate_ref = ft.Ref[ft.TextField]()
         edit_matter_my_rate_container_ref = ft.Ref[ft.Container]()
+        edit_matter_budget_ref = ft.Ref[ft.TextField]()
+        edit_matter_threshold_ref = ft.Ref[ft.TextField]()
+        edit_matter_budget_container_ref = ft.Ref[ft.Container]()
         edit_matter_dialog_ref = ft.Ref[ft.AlertDialog]()
     
         def open_edit_matter_dialog(mid: int, path: str):
@@ -1908,6 +2009,15 @@ class SentinelApp:
                     edit_matter_my_rate_ref.current.error_text = None
                 except ValueError:
                     edit_matter_my_rate_ref.current.value = ""
+            if edit_matter_budget_container_ref.current:
+                edit_matter_budget_container_ref.current.visible = is_owner
+            if edit_matter_budget_ref.current and edit_matter_threshold_ref.current and is_owner:
+                budget_val = getattr(matter, "budget_eur", None)
+                edit_matter_budget_ref.current.value = str(budget_val) if budget_val is not None else ""
+                edit_matter_budget_ref.current.error_text = None
+                thresh_val = getattr(matter, "budget_threshold", None)
+                edit_matter_threshold_ref.current.value = str(int(thresh_val * 100)) if thresh_val is not None else "80"
+                edit_matter_threshold_ref.current.error_text = None
             if edit_matter_dialog_ref.current:
                 edit_matter_dialog_ref.current.title = ft.Text(f"Edit: {path}")
                 edit_matter_dialog_ref.current.open = True
@@ -1935,14 +2045,50 @@ class SentinelApp:
                         edit_matter_rate_ref.current.error_text = "Enter a number or leave empty to clear."
                         page.update()
                         return
+                budget_val = None
+                if edit_matter_budget_ref.current:
+                    budget_str = (edit_matter_budget_ref.current.value or "").strip()
+                    if budget_str:
+                        try:
+                            budget_val = float(budget_str)
+                            if budget_val < 0:
+                                edit_matter_budget_ref.current.error_text = "Budget must be ≥ 0."
+                                page.update()
+                                return
+                        except ValueError:
+                            edit_matter_budget_ref.current.error_text = "Enter a number or leave empty to clear."
+                            page.update()
+                            return
+                    edit_matter_budget_ref.current.error_text = None
+                thresh_val = None
+                if edit_matter_threshold_ref.current:
+                    thresh_str = (edit_matter_threshold_ref.current.value or "").strip()
+                    if thresh_str:
+                        try:
+                            pct = float(thresh_str)
+                            if not (1 <= pct <= 100):
+                                edit_matter_threshold_ref.current.error_text = "Threshold must be between 1 and 100."
+                                page.update()
+                                return
+                            thresh_val = pct / 100.0
+                        except ValueError:
+                            edit_matter_threshold_ref.current.error_text = "Enter a number or leave empty to use default."
+                            page.update()
+                            return
+                    edit_matter_threshold_ref.current.error_text = None
                 try:
-                    self.db.update_matter(mid, hourly_rate_euro=rate_val)
+                    self.db.update_matter(
+                        mid,
+                        hourly_rate_euro=rate_val,
+                        budget_eur=budget_val,
+                        budget_threshold=thresh_val,
+                    )
                     if edit_matter_dialog_ref.current:
                         edit_matter_dialog_ref.current.open = False
                     refresh_list()
                     if on_matters_changed:
                         on_matters_changed()
-                    page.snack_bar = ft.SnackBar(ft.Text("Hourly rate updated."), open=True)
+                    page.snack_bar = ft.SnackBar(ft.Text("Matter updated."), open=True)
                 except ValueError as err:
                     edit_matter_rate_ref.current.error_text = str(err)
             else:
@@ -1984,6 +2130,17 @@ class SentinelApp:
                     ft.Container(
                         ref=edit_matter_my_rate_container_ref,
                         content=ft.TextField(ref=edit_matter_my_rate_ref, label="My rate for this matter (€)", width=300, hint_text="Override your rate for this matter; leave empty to use matter or default"),
+                        visible=False,
+                    ),
+                    ft.Container(
+                        ref=edit_matter_budget_container_ref,
+                        content=ft.Column(
+                            [
+                                ft.TextField(ref=edit_matter_budget_ref, label="Budget (€)", width=300, hint_text="Leave empty for no budget"),
+                                ft.TextField(ref=edit_matter_threshold_ref, label="Budget warning threshold (%)", width=300, hint_text="1–100; default 80"),
+                            ],
+                            tight=True,
+                        ),
                         visible=False,
                     ),
                     ft.Row(
@@ -2393,6 +2550,8 @@ class SentinelApp:
                 horizontal_alignment=ft.CrossAxisAlignment.START,
             )
 
+        path_list = self.db.get_matters_with_full_paths()
+        matter_id_by_path = {path: mid for mid, path in path_list}
         by_client: dict[str, list[tuple[str, float, float, float, float, str]]] = defaultdict(list)
         for row in rows_data:
             client_name, matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_inv_amount_eur, rate_source = row
@@ -2425,6 +2584,34 @@ class SentinelApp:
             ),
             reverse=True,
         )
+
+        def _reporting_matter_row(matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_inv_amount_eur, rate_source, matter_id_by_path):
+            mid = matter_id_by_path.get(matter_path)
+            budget_parts = []
+            if mid:
+                status = self.db.get_matter_budget_status(mid)
+                if status.get("budget_eur") is not None and status["budget_eur"] > 0:
+                    budget = status["budget_eur"]
+                    pct = int((status.get("ratio") or 0) * 100)
+                    budget_str = f" · Budget: {format_eur(budget)} ({pct}% used)"
+                    if status.get("over_budget"):
+                        budget_parts.append(ft.Text(budget_str, size=12, color=ft.Colors.RED))
+                    elif status.get("near_budget"):
+                        budget_parts.append(ft.Text(budget_str, size=12, color=ft.Colors.ORANGE))
+                    else:
+                        budget_parts.append(ft.Text(budget_str, size=12, color=ft.Colors.GREY_400))
+            subtitle_parts = [
+                ft.Text(f"Total {format_elapsed(total_seconds)} · Not inv. {format_elapsed(not_invoiced_seconds)} · ", size=12),
+                ft.Text("Chargeable ", size=12),
+                ft.Text(format_eur(total_amount_eur), size=12, color=_rate_source_color(rate_source)),
+                ft.Text(f" (not inv. ", size=12),
+                ft.Text(format_eur(not_inv_amount_eur), size=12, color=_rate_source_color(rate_source)),
+                ft.Text(")", size=12),
+            ] + budget_parts
+            return ft.ListTile(
+                title=ft.Text(matter_path, size=14),
+                subtitle=ft.Row(subtitle_parts, wrap=True),
+            )
 
         def on_search(e):
             if not search_results_ref.current:
@@ -2485,23 +2672,7 @@ class SentinelApp:
                         ft.Container(
                             content=ft.Column(
                                 [
-                                    ft.ListTile(
-                                        title=ft.Text(matter_path, size=14),
-                                        subtitle=ft.Row(
-                                            [
-                                                ft.Text(
-                                                    f"Total {format_elapsed(total_seconds)} · Not inv. {format_elapsed(not_invoiced_seconds)} · ",
-                                                    size=12,
-                                                ),
-                                                ft.Text("Chargeable ", size=12),
-                                                ft.Text(format_eur(total_amount_eur), size=12, color=_rate_source_color(rate_source)),
-                                                ft.Text(f" (not inv. ", size=12),
-                                                ft.Text(format_eur(not_inv_amount_eur), size=12, color=_rate_source_color(rate_source)),
-                                                ft.Text(")", size=12),
-                                            ],
-                                            wrap=True,
-                                        ),
-                                    )
+                                    _reporting_matter_row(matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_inv_amount_eur, rate_source, matter_id_by_path)
                                     for (matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_inv_amount_eur, rate_source) in sorted(
                                         matter_rows, key=lambda r: r[0]
                                     )
@@ -2621,6 +2792,25 @@ class SentinelApp:
                 include_all_users=current_user_is_admin
             )
             q = (query or "").strip().lower()
+            def _timesheet_budget_trailing(mid: int):
+                status = self.db.get_matter_budget_status(mid)
+                if status.get("budget_eur") is None or status["budget_eur"] <= 0:
+                    return None
+                total = status["total_eur"]
+                budget = status["budget_eur"]
+                pct = int((status.get("ratio") or 0) * 100)
+                if status.get("over_budget"):
+                    return ft.Tooltip(
+                        message=f"Budget: {format_eur(budget)}, used: {format_eur(total)} ({pct}%) – over budget",
+                        content=ft.Icon(ft.Icons.WARNING, color=ft.Colors.RED, size=18),
+                    )
+                if status.get("near_budget"):
+                    return ft.Tooltip(
+                        message=f"Budget: {format_eur(budget)}, used: {format_eur(total)} ({pct}%) – near budget",
+                        content=ft.Icon(ft.Icons.WARNING_AMBER, color=ft.Colors.ORANGE, size=18),
+                    )
+                return None
+
             if q:
                 flat = [(mid, path) for mid, path in path_list if path and q in path.lower()][:30]
                 return [
@@ -2630,6 +2820,7 @@ class SentinelApp:
                             value=mid in timesheet_selected_ids,
                             on_change=lambda e, mid=mid: _on_timesheet_check(mid, e.control.value),
                         ),
+                        trailing=_timesheet_budget_trailing(mid),
                     )
                     for mid, path in flat
                 ]
@@ -2677,6 +2868,7 @@ class SentinelApp:
                                         value=mid in timesheet_selected_ids,
                                         on_change=lambda e, mid=mid: _on_timesheet_check(mid, e.control.value),
                                     ),
+                                    trailing=_timesheet_budget_trailing(mid),
                                 )
                                 for mid, path in items
                             ],

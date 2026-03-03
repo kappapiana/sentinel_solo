@@ -28,6 +28,8 @@ class Matter(Base):
     name = Column(String, nullable=False)
     parent_id = Column(Integer, ForeignKey("matters.id"), nullable=True)
     hourly_rate_euro = Column(Float, nullable=True)
+    budget_eur = Column(Float, nullable=True)
+    budget_threshold = Column(Float, nullable=True)
 
     owner = relationship("User", back_populates="matters")
     sub_matters = relationship("Matter", backref="parent", remote_side=[id])

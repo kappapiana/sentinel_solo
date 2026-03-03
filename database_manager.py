@@ -193,6 +193,12 @@ class DatabaseManager:
                 if "hourly_rate_euro" not in matter_cols:
                     conn.execute(text("ALTER TABLE matters ADD COLUMN hourly_rate_euro REAL"))
                     conn.commit()
+                if "budget_eur" not in matter_cols:
+                    conn.execute(text("ALTER TABLE matters ADD COLUMN budget_eur REAL"))
+                    conn.commit()
+                if "budget_threshold" not in matter_cols:
+                    conn.execute(text("ALTER TABLE matters ADD COLUMN budget_threshold REAL"))
+                    conn.commit()
             if "time_entries" in insp.get_table_names():
                 te_cols = [c["name"] for c in insp.get_columns("time_entries")]
                 if "activity_group_id" not in te_cols:
@@ -659,8 +665,10 @@ class DatabaseManager:
         matter_code: str | None = None,
         parent_id: int | None = None,
         hourly_rate_euro: float | None = _UNSET,
+        budget_eur: float | None = _UNSET,
+        budget_threshold: float | None = _UNSET,
     ) -> None:
-        """Update matter (owner only; optional fields). Pass None for hourly_rate_euro to clear."""
+        """Update matter (owner only; optional fields). Pass None for hourly_rate_euro/budget_eur/budget_threshold to clear."""
         self._require_user()
         with self._session() as session:
             matter = self._matter_query(session).filter(Matter.id == matter_id).first()
@@ -674,6 +682,10 @@ class DatabaseManager:
                 matter.parent_id = parent_id
             if hourly_rate_euro is not _UNSET:
                 matter.hourly_rate_euro = hourly_rate_euro
+            if budget_eur is not _UNSET:
+                matter.budget_eur = budget_eur
+            if budget_threshold is not _UNSET:
+                matter.budget_threshold = budget_threshold
             session.commit()
 
     def get_matters_with_full_paths(
@@ -1010,6 +1022,8 @@ class DatabaseManager:
                     "name": m.name,
                     "parent_id": m.parent_id,
                     "hourly_rate_euro": getattr(m, "hourly_rate_euro", None),
+                    "budget_eur": getattr(m, "budget_eur", None),
+                    "budget_threshold": getattr(m, "budget_threshold", None),
                 }
                 for m in matters
             ],
@@ -1081,6 +1095,8 @@ class DatabaseManager:
                         name=row["name"],
                         parent_id=row.get("parent_id"),
                         hourly_rate_euro=row.get("hourly_rate_euro"),
+                        budget_eur=row.get("budget_eur"),
+                        budget_threshold=row.get("budget_threshold"),
                     )
                 )
             session.flush()
@@ -1281,6 +1297,61 @@ class DatabaseManager:
             mq = self._matter_query(session)
             matter = mq.filter(Matter.id == matter_id).first()
             return self._resolve_hourly_rate_in_session(session, matter, oid, mq)
+
+    def get_matter_budget_usage(
+        self, matter_id: int
+    ) -> tuple[float, float | None, float | None]:
+        """
+        Return (total_eur, budget_eur, threshold) for a matter.
+        total_eur = sum of chargeable amounts for all time entries on that matter (all users).
+        budget_eur and threshold from matter; threshold defaults to 0.8 when None.
+        """
+        self._require_user()
+        with self._session() as session:
+            matter = self._matter_query(session).filter(Matter.id == matter_id).first()
+            if matter is None:
+                return (0.0, None, 0.8)
+            entries = (
+                self._time_entry_query(session)
+                .filter(TimeEntry.matter_id == matter_id, TimeEntry.end_time.isnot(None))
+                .all()
+            )
+            mq = self._matter_query(session)
+            total_eur = 0.0
+            for e in entries:
+                rate, _ = self._resolve_hourly_rate_in_session(
+                    session, matter, e.owner_id, mq
+                )
+                dur = e.duration_seconds or 0.0
+                total_eur += self.amount_eur_from_seconds(dur, rate)
+            budget_eur = getattr(matter, "budget_eur", None)
+            threshold = getattr(matter, "budget_threshold", None)
+            if threshold is None:
+                threshold = 0.8
+            return (round(total_eur, 2), budget_eur, float(threshold))
+
+    def get_matter_budget_status(self, matter_id: int) -> dict:
+        """
+        Return budget status dict: total_eur, budget_eur, threshold, ratio,
+        near_budget (ratio >= threshold and < 1), over_budget (ratio >= 1).
+        When budget_eur is None, returns near_budget=False, over_budget=False.
+        """
+        total_eur, budget_eur, threshold = self.get_matter_budget_usage(matter_id)
+        result: dict = {
+            "total_eur": total_eur,
+            "budget_eur": budget_eur,
+            "threshold": threshold,
+            "ratio": None,
+            "near_budget": False,
+            "over_budget": False,
+        }
+        if budget_eur is None or budget_eur <= 0:
+            return result
+        ratio = total_eur / budget_eur
+        result["ratio"] = round(ratio, 4)
+        result["near_budget"] = threshold <= ratio < 1.0
+        result["over_budget"] = ratio >= 1.0
+        return result
 
     @staticmethod
     def amount_eur_from_seconds(duration_seconds: float, rate: float) -> float:
