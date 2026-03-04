@@ -1298,25 +1298,47 @@ class DatabaseManager:
             matter = mq.filter(Matter.id == matter_id).first()
             return self._resolve_hourly_rate_in_session(session, matter, oid, mq)
 
+    def _effective_budget_for_matter(
+        self, session: Session, matter: Matter, mq
+    ) -> tuple[float | None, str | None]:
+        """
+        Return (effective_budget, budget_in_path) for a matter.
+        effective_budget = minimum of this matter's budget and all ancestor budgets.
+        budget_in_path = full path of the matter where the effective budget is set (e.g. "Client A" or "Client A > Project X").
+        """
+        candidates: list[tuple[float, str]] = []
+        current = matter
+        while current is not None:
+            b = getattr(current, "budget_eur", None)
+            if b is not None and b > 0:
+                path = current.get_full_path(session)
+                candidates.append((float(b), path))
+            if current.parent_id is None:
+                break
+            current = mq.filter(Matter.id == current.parent_id).first()
+        if not candidates:
+            return (None, None)
+        best = min(candidates, key=lambda x: x[0])
+        return (best[0], best[1])
+
     def get_matter_budget_usage(
         self, matter_id: int
-    ) -> tuple[float, float | None, float | None]:
+    ) -> tuple[float, float | None, float | None, str | None]:
         """
-        Return (total_eur, budget_eur, threshold) for a matter.
-        total_eur = sum of chargeable amounts for all time entries on that matter (all users).
-        budget_eur and threshold from matter; threshold defaults to 0.8 when None.
+        Return (total_eur, budget_eur, threshold, budget_in_path) for a matter.
+        budget_in_path = full path of the matter where the effective budget is set.
         """
         self._require_user()
         with self._session() as session:
-            matter = self._matter_query(session).filter(Matter.id == matter_id).first()
+            mq = self._matter_query(session)
+            matter = mq.filter(Matter.id == matter_id).first()
             if matter is None:
-                return (0.0, None, 0.8)
+                return (0.0, None, 0.8, None)
             entries = (
                 self._time_entry_query(session)
                 .filter(TimeEntry.matter_id == matter_id, TimeEntry.end_time.isnot(None))
                 .all()
             )
-            mq = self._matter_query(session)
             total_eur = 0.0
             for e in entries:
                 rate, _ = self._resolve_hourly_rate_in_session(
@@ -1324,23 +1346,24 @@ class DatabaseManager:
                 )
                 dur = e.duration_seconds or 0.0
                 total_eur += self.amount_eur_from_seconds(dur, rate)
-            budget_eur = getattr(matter, "budget_eur", None)
+            budget_eur, budget_in_path = self._effective_budget_for_matter(session, matter, mq)
             threshold = getattr(matter, "budget_threshold", None)
             if threshold is None:
                 threshold = 0.8
-            return (round(total_eur, 2), budget_eur, float(threshold))
+            return (round(total_eur, 2), budget_eur, float(threshold), budget_in_path)
 
     def get_matter_budget_status(self, matter_id: int) -> dict:
         """
-        Return budget status dict: total_eur, budget_eur, threshold, ratio,
+        Return budget status dict: total_eur, budget_eur, threshold, budget_in, ratio,
         near_budget (ratio >= threshold and < 1), over_budget (ratio >= 1).
-        When budget_eur is None, returns near_budget=False, over_budget=False.
+        budget_in = full path of the matter where the effective budget is set.
         """
-        total_eur, budget_eur, threshold = self.get_matter_budget_usage(matter_id)
+        total_eur, budget_eur, threshold, budget_in_path = self.get_matter_budget_usage(matter_id)
         result: dict = {
             "total_eur": total_eur,
             "budget_eur": budget_eur,
             "threshold": threshold,
+            "budget_in": budget_in_path,
             "ratio": None,
             "near_budget": False,
             "over_budget": False,

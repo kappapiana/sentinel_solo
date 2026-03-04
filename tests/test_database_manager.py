@@ -509,7 +509,7 @@ class TestMatterBudget:
         """When budget_eur is None, near_budget and over_budget are False."""
         client = db_user1.add_matter("C", "c", parent_id=None)
         project = db_user1.add_matter("P", "p", parent_id=client.id)
-        total, budget_eur, threshold = db_user1.get_matter_budget_usage(project.id)
+        total, budget_eur, threshold, budget_in = db_user1.get_matter_budget_usage(project.id)
         assert budget_eur is None
         status = db_user1.get_matter_budget_status(project.id)
         assert status["near_budget"] is False
@@ -598,6 +598,23 @@ class TestMatterBudget:
         db_user2.add_manual_time_entry(project.id, "U2", start_time=end1, end_time=end2)
         status = db_user1.get_matter_budget_status(project.id)
         assert status["total_eur"] == 400.0
+        assert status["near_budget"] is True
+
+    def test_budget_lower_ancestor_wins(self, db_user1: DatabaseManager):
+        """When client has lower budget than child matter, effective budget is the minimum (client)."""
+        today = date.today()
+        start = datetime.combine(today, datetime.min.time().replace(hour=9, minute=0))
+        db_user1.update_user(db_user1.current_user_id, default_hourly_rate_euro=100.0)
+        client = db_user1.add_matter("C", "c", parent_id=None)
+        project = db_user1.add_matter("P", "p", parent_id=client.id)
+        db_user1.update_matter(client.id, budget_eur=1000.0)  # client: 1000
+        db_user1.update_matter(project.id, budget_eur=2000.0)  # project: 2000 (higher)
+        # 9h at 100€/h = 900€. Effective = min(1000, 2000) = 1000. Ratio = 90% → near_budget
+        end = start + timedelta(hours=9)
+        db_user1.add_manual_time_entry(project.id, "Work", start_time=start, end_time=end)
+        status = db_user1.get_matter_budget_status(project.id)
+        assert status["total_eur"] == 900.0
+        assert status["budget_eur"] == 1000.0  # effective = lower (client)
         assert status["near_budget"] is True
 
 

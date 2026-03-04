@@ -97,6 +97,10 @@ if [[ -n "$USE_POSTGRES_INTERACTIVE" ]]; then
         echo "Error: User and database name are required." >&2
         exit 1
     fi
+    if [[ -z "$pg_pass" ]]; then
+        echo "Error: Password is required. PostgreSQL connection requires authentication." >&2
+        exit 1
+    fi
     # URL-encode password so special characters don't break the URL (pass via stdin to avoid exposure in process list)
     if ! pg_pass_encoded="$(printf '%s' "$pg_pass" | "$PYTHON" -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))')"; then
         echo "Error: failed to URL-encode PostgreSQL password using $PYTHON. Please ensure Python 3 is installed." >&2
@@ -129,6 +133,10 @@ elif [[ -n "$POSTGRES_PARAMS_FILE" ]]; then
     echo ""
     if [[ -z "$pg_user" ]] || [[ -z "$pg_db" ]]; then
         echo "Error: PGUSER and PGDATABASE are required in $POSTGRES_PARAMS_FILE." >&2
+        exit 1
+    fi
+    if [[ -z "$pg_pass" ]]; then
+        echo "Error: Password is required. PostgreSQL connection requires authentication." >&2
         exit 1
     fi
     if ! pg_pass_encoded="$(printf '%s' "$pg_pass" | "$PYTHON" -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))')"; then

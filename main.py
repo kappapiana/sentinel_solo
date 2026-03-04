@@ -12,7 +12,7 @@ from typing import Callable
 import flet as ft
 import bcrypt
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from database_manager import DatabaseManager, db
 
@@ -329,6 +329,10 @@ class SentinelApp:
                 expand=True,
             )
         )
+        # Initial refresh of timer (matter list + near-budget banner)
+        refresh = (page.data or {}).get("refresh_timer_matters")
+        if refresh:
+            refresh()
 
     def _build_timer_tab(self) -> ft.Control:
         """Build the Timer tab: searchable folded matter list, task description, Start/Stop, live-updating label."""
@@ -468,6 +472,65 @@ class SentinelApp:
                 timer_matter_list_ref.current.controls = _build_timer_matter_list(e.control.value or "")
                 page.update()
 
+        near_budget_banner_ref = ft.Ref[ft.Container]()
+
+        def _update_near_budget_banner():
+            """Show banner when any timer matter is over or near budget; hide if dismissed for session."""
+            if near_budget_banner_ref.current is None:
+                return
+            timer_matters = self.db.get_matters_with_full_paths(for_timer=True)
+            over: list[tuple[int, str, dict]] = []
+            near: list[tuple[int, str, dict]] = []
+            for mid, path in timer_matters:
+                status = self.db.get_matter_budget_status(mid)
+                if status.get("over_budget"):
+                    over.append((mid, path, status))
+                elif status.get("near_budget"):
+                    near.append((mid, path, status))
+            combined = over + near
+            dismissed = (page.data or {}).get("timer_near_budget_dismissed", False)
+            if dismissed or not combined:
+                near_budget_banner_ref.current.visible = False
+                return
+            budget_in = combined[0][2].get("budget_in")
+            budget_in_suffix = f" (Budget in {budget_in})" if budget_in else ""
+            parts = []
+            if over:
+                names = ", ".join(p for _, p, _ in over[:2])
+                if len(over) > 2:
+                    names += f" +{len(over) - 2}"
+                parts.append(f"Over: {names}")
+            if near:
+                names = ", ".join(p for _, p, _ in near[:2])
+                if len(near) > 2:
+                    names += f" +{len(near) - 2}"
+                parts.append(f"Approaching: {names}")
+            msg = ". ".join(parts) + budget_in_suffix
+
+            def _on_dismiss(_):
+                if page.data is None:
+                    page.data = {}
+                page.data["timer_near_budget_dismissed"] = True
+                near_budget_banner_ref.current.visible = False
+                page.update()
+
+            near_budget_banner_ref.current.content = ft.Row(
+                [
+                    ft.Icon(ft.Icons.WARNING, color=ft.Colors.ORANGE, size=20),
+                    ft.Text(msg, size=14, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1, expand=True),
+                    ft.IconButton(
+                        icon=ft.Icons.CLOSE,
+                        icon_size=18,
+                        tooltip="Dismiss for this session",
+                        on_click=_on_dismiss,
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                wrap=False,
+                tight=True,
+            )
+            near_budget_banner_ref.current.visible = True
+
         def refresh_timer_matter_list():
             nonlocal options, options_all
             options = self.db.get_matters_with_full_paths(for_timer=True)
@@ -483,6 +546,7 @@ class SentinelApp:
             if timer_matter_list_ref.current:
                 q = timer_matter_search_ref.current.value if timer_matter_search_ref.current else ""
                 timer_matter_list_ref.current.controls = _build_timer_matter_list(q)
+            _update_near_budget_banner()
             page.update()
 
         if page.data is None:
@@ -710,7 +774,8 @@ class SentinelApp:
         def refresh_activities():
             if activities_list_ref.current:
                 activities_list_ref.current.controls = _build_activities_rows()
-                page.update()
+            _update_near_budget_banner()
+            page.update()
 
         def _set_selected_day(new_day: date) -> None:
             """Update selected_day state, header label, field, and refresh list."""
@@ -1010,15 +1075,17 @@ class SentinelApp:
             total = status["total_eur"]
             budget = status["budget_eur"]
             pct = int((status.get("ratio") or 0) * 100)
+            budget_in = status.get("budget_in")
+            budget_in_suffix = f" (Budget in {budget_in})" if budget_in else ""
             if status.get("over_budget"):
                 page.snack_bar = ft.SnackBar(
-                    ft.Text(f"Budget exceeded for this matter: {format_eur(total)} of {format_eur(budget)} logged."),
+                    ft.Text(f"Budget exceeded for this matter: {format_eur(total)} of {format_eur(budget)} logged.{budget_in_suffix}"),
                     open=True,
                 )
                 return True
             if status.get("near_budget"):
                 page.snack_bar = ft.SnackBar(
-                    ft.Text(f"Warning: budget for this matter is at {pct}% ({format_eur(total)} of {format_eur(budget)})."),
+                    ft.Text(f"Warning: budget for this matter is at {pct}% ({format_eur(total)} of {format_eur(budget)}).{budget_in_suffix}"),
                     open=True,
                 )
                 return True
@@ -1272,8 +1339,19 @@ class SentinelApp:
             on_click=_on_manual_toggle,
         )
 
+        near_budget_banner = ft.Container(
+            ref=near_budget_banner_ref,
+            content=ft.Row([], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+            visible=False,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+            padding=12,
+            border_radius=8,
+        )
+
         timer_controls = [
             ft.Text("Timer", size=24, weight=ft.FontWeight.BOLD),
+            ft.Container(height=8),
+            near_budget_banner,
             ft.Container(height=8),
             activities_section,
         ]
@@ -1401,17 +1479,23 @@ class SentinelApp:
                         total = budget_status["total_eur"]
                         budget = budget_status["budget_eur"]
                         pct = int((budget_status.get("ratio") or 0) * 100)
+                        budget_in = budget_status.get("budget_in")
+                        budget_in_suffix = f" Budget in {budget_in}." if budget_in else ""
                         if budget_status.get("over_budget"):
-                            tooltip = f"Budget: {format_eur(budget)}, used: {format_eur(total)} ({pct}%) – over budget"
-                            leading_icon = ft.Tooltip(
-                                message=tooltip,
-                                content=ft.Icon(ft.Icons.WARNING, color=ft.Colors.RED, size=18),
+                            tooltip = f"Budget: {format_eur(budget)}, used: {format_eur(total)} ({pct}%) – over budget.{budget_in_suffix}"
+                            leading_icon = ft.Icon(
+                                ft.Icons.WARNING,
+                                color=ft.Colors.RED,
+                                size=18,
+                                tooltip=tooltip,
                             )
                         elif budget_status.get("near_budget"):
-                            tooltip = f"Budget: {format_eur(budget)}, used: {format_eur(total)} ({pct}%) – near budget"
-                            leading_icon = ft.Tooltip(
-                                message=tooltip,
-                                content=ft.Icon(ft.Icons.WARNING_AMBER, color=ft.Colors.ORANGE, size=18),
+                            tooltip = f"Budget: {format_eur(budget)}, used: {format_eur(total)} ({pct}%) – near budget.{budget_in_suffix}"
+                            leading_icon = ft.Icon(
+                                ft.Icons.WARNING_AMBER,
+                                color=ft.Colors.ORANGE,
+                                size=18,
+                                tooltip=tooltip,
                             )
                     items_list = [
                         ft.PopupMenuItem(
@@ -2593,7 +2677,9 @@ class SentinelApp:
                 if status.get("budget_eur") is not None and status["budget_eur"] > 0:
                     budget = status["budget_eur"]
                     pct = int((status.get("ratio") or 0) * 100)
-                    budget_str = f" · Budget: {format_eur(budget)} ({pct}% used)"
+                    budget_in = status.get("budget_in")
+                    budget_in_suffix = f" in [{budget_in}]" if budget_in else ""
+                    budget_str = f" · Budget: {format_eur(budget)} ({pct}% used){budget_in_suffix}"
                     if status.get("over_budget"):
                         budget_parts.append(ft.Text(budget_str, size=12, color=ft.Colors.RED))
                     elif status.get("near_budget"):
@@ -2799,15 +2885,21 @@ class SentinelApp:
                 total = status["total_eur"]
                 budget = status["budget_eur"]
                 pct = int((status.get("ratio") or 0) * 100)
+                budget_in = status.get("budget_in")
+                budget_in_suffix = f" Budget in {budget_in}." if budget_in else ""
                 if status.get("over_budget"):
-                    return ft.Tooltip(
-                        message=f"Budget: {format_eur(budget)}, used: {format_eur(total)} ({pct}%) – over budget",
-                        content=ft.Icon(ft.Icons.WARNING, color=ft.Colors.RED, size=18),
+                    return ft.Icon(
+                        ft.Icons.WARNING,
+                        color=ft.Colors.RED,
+                        size=18,
+                        tooltip=f"Budget: {format_eur(budget)}, used: {format_eur(total)} ({pct}%) – over budget.{budget_in_suffix}",
                     )
                 if status.get("near_budget"):
-                    return ft.Tooltip(
-                        message=f"Budget: {format_eur(budget)}, used: {format_eur(total)} ({pct}%) – near budget",
-                        content=ft.Icon(ft.Icons.WARNING_AMBER, color=ft.Colors.ORANGE, size=18),
+                    return ft.Icon(
+                        ft.Icons.WARNING_AMBER,
+                        color=ft.Colors.ORANGE,
+                        size=18,
+                        tooltip=f"Budget: {format_eur(budget)}, used: {format_eur(total)} ({pct}%) – near budget.{budget_in_suffix}",
                     )
                 return None
 
@@ -3709,9 +3801,43 @@ def _build_login_view(
     )
 
 
+def _connection_error_hint(exc: Exception) -> str:
+    """Return a user-friendly hint for database connection errors."""
+    msg = str(exc).lower()
+    if "no password supplied" in msg or "password" in msg:
+        return " If using PostgreSQL, ensure DATABASE_URL includes the password. Re-run: ./install.sh --postgres"
+    if "connection" in msg or "connect" in msg:
+        return " Check that the database server is reachable and DATABASE_URL is correct."
+    return ""
+
+
 async def main(page: ft.Page) -> None:
     login_db = DatabaseManager()
-    login_db.init_db()
+    try:
+        login_db.init_db()
+    except OperationalError as e:
+        hint = _connection_error_hint(e)
+        page.add(
+            ft.SafeArea(
+                ft.Container(
+                    ft.Column(
+                        [
+                            ft.Text("Database connection failed", size=24, weight=ft.FontWeight.BOLD),
+                            ft.Container(height=16),
+                            ft.Text(str(e), size=12, selectable=True),
+                            ft.Container(height=8),
+                            ft.Text(hint, size=12, color=ft.Colors.ORANGE_400),
+                        ],
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        expand=True,
+                    ),
+                    alignment=ft.Alignment.CENTER,
+                    expand=True,
+                )
+            )
+        )
+        page.update()
+        return
 
     async def go_main(user_id: int, username: str) -> None:
         await page.shared_preferences.set(STORAGE_USER_ID, str(user_id))
