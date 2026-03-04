@@ -15,6 +15,7 @@ import bcrypt
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from database_manager import DatabaseManager, db
+from utils import picker_value_to_local_date
 
 __version__ = "v0.2.2"
 
@@ -790,11 +791,7 @@ class SentinelApp:
             """Handle date selection from the DatePicker."""
             picker = date_picker_ref.current or getattr(e, "control", None)
             new_val = getattr(picker, "value", None)
-            new_day: date | None = None
-            if isinstance(new_val, datetime):
-                new_day = new_val.date()
-            elif isinstance(new_val, date):
-                new_day = new_val
+            new_day = picker_value_to_local_date(new_val)
             if new_day is not None:
                 _set_selected_day(new_day)
 
@@ -802,11 +799,7 @@ class SentinelApp:
             """Update the change-date dialog field when picking a date from the mini calendar."""
             picker = change_date_picker_ref.current or getattr(e, "control", None)
             new_val = getattr(picker, "value", None)
-            new_day: date | None = None
-            if isinstance(new_val, datetime):
-                new_day = new_val.date()
-            elif isinstance(new_val, date):
-                new_day = new_val
+            new_day = picker_value_to_local_date(new_val)
             if new_day is not None and change_date_field_ref.current:
                 change_date_field_ref.current.value = new_day.isoformat()
                 page.update()
