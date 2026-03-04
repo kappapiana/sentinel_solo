@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 
 from database_manager import DatabaseManager, db
 
-__version__ = "v0.2.1"
+__version__ = "v0.2.2"
 
 # Storage keys for persisted login (optional restore)
 STORAGE_USER_ID = "user_id"
