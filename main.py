@@ -154,6 +154,8 @@ class SentinelApp:
         timer_tab = self._build_timer_tab()
 
         def refresh_timer_dropdown():
+            if page.data is not None:
+                page.data["reporting_stale"] = True
             refresh = (page.data or {}).get("refresh_timer_matters")
             if refresh:
                 refresh()
@@ -163,22 +165,29 @@ class SentinelApp:
 
         matters_tab = self._build_matters_tab(refresh_timer_dropdown)
 
+        reporting_cached: list = [None]
+
         def on_toggle_client(client_name: str):
             self.expanded_clients.symmetric_difference_update([client_name])
             reporting_container.content = self._build_reporting_tab(on_toggle_client)
+            reporting_cached[0] = reporting_container.content
             page.update()
 
         if page.data is None:
             page.data = {}
         page.data["reporting_sort"] = page.data.get("reporting_sort") or "most_uninvoiced"
+        page.data["reporting_stale"] = True
 
         def refresh_reporting():
             reporting_container.content = self._build_reporting_tab(on_toggle_client)
+            reporting_cached[0] = reporting_container.content
+            page.data["reporting_stale"] = False
             page.update()
 
         page.data["refresh_reporting"] = refresh_reporting
 
         reporting_tab = self._build_reporting_tab(on_toggle_client)
+        reporting_cached[0] = reporting_tab
         timesheet_tab = self._build_timesheet_tab()
         users_container = (
             ft.Container(content=self._build_users_tab(), expand=True)
@@ -190,31 +199,55 @@ class SentinelApp:
         reporting_container = ft.Container(content=reporting_tab, expand=True)
         timesheet_container = ft.Container(content=timesheet_tab, expand=True)
 
+        async def _async_timer_refresh():
+            def _do():
+                r = (page.data or {}).get("refresh_timer_matters")
+                if r:
+                    r()
+                ra = (page.data or {}).get("refresh_timer_activities")
+                if ra:
+                    ra()
+            await asyncio.to_thread(_do)
+            page.update()
+
         def show_timer(_):
             self.body_ref.current.content = timer_container
-            refresh = (page.data or {}).get("refresh_timer_matters")
-            if refresh:
-                refresh()
-            refresh_activities = (page.data or {}).get("refresh_timer_activities")
-            if refresh_activities:
-                refresh_activities()
             page.update()
+            page.run_task(_async_timer_refresh)
 
         def show_matters(_):
             self.body_ref.current.content = matters_container
             page.update()
 
         def show_reporting(_):
-            reporting_container.content = self._build_reporting_tab(on_toggle_client)
+            if page.data.get("reporting_stale", True) or reporting_cached[0] is None:
+                async def _async_reporting_refresh():
+                    content = await asyncio.to_thread(
+                        self._build_reporting_tab, on_toggle_client
+                    )
+                    reporting_container.content = content
+                    reporting_cached[0] = content
+                    if page.data is not None:
+                        page.data["reporting_stale"] = False
+                    page.update()
+                page.run_task(_async_reporting_refresh)
+            else:
+                reporting_container.content = reporting_cached[0]
             self.body_ref.current.content = reporting_container
+            page.update()
+
+        async def _async_timesheet_refresh():
+            def _do():
+                r = (page.data or {}).get("refresh_timesheet_matters")
+                if r:
+                    r()
+            await asyncio.to_thread(_do)
             page.update()
 
         def show_timesheet(_):
             self.body_ref.current.content = timesheet_container
-            refresh = (page.data or {}).get("refresh_timesheet_matters")
-            if refresh:
-                refresh()
             page.update()
+            page.run_task(_async_timesheet_refresh)
 
         def show_users(_):
             if users_container is not None:
@@ -293,7 +326,7 @@ class SentinelApp:
         def _on_rail_change_with_logout(e):
             if logout_callback and e.control.selected_index == len(destinations) - 1:
                 e.control.selected_index = 0
-                page.update()
+                e.control.update()
                 page.run_task(_do_logout, e)
                 return
             on_rail_change(e)
@@ -460,18 +493,18 @@ class SentinelApp:
                 timer_matter_list_ref.current.controls = _build_timer_matter_list(
                     timer_matter_search_ref.current.value if timer_matter_search_ref.current else ""
                 )
-                page.update()
+                timer_matter_list_ref.current.update()
 
         def _on_timer_matter_select(mid: int, path: str):
             timer_matter_selected[0], timer_matter_selected[1] = mid, path
             if timer_matter_selection_ref.current:
                 timer_matter_selection_ref.current.value = f"Selected: {path}"
-            page.update()
+                timer_matter_selection_ref.current.update()
 
         def on_timer_matter_search(e):
             if timer_matter_list_ref.current and timer_matter_search_ref.current:
                 timer_matter_list_ref.current.controls = _build_timer_matter_list(e.control.value or "")
-                page.update()
+                timer_matter_list_ref.current.update()
 
         near_budget_banner_ref = ft.Ref[ft.Container]()
 
@@ -480,10 +513,12 @@ class SentinelApp:
             if near_budget_banner_ref.current is None:
                 return
             timer_matters = self.db.get_matters_with_full_paths(for_timer=True)
+            matter_ids = [mid for mid, _ in timer_matters]
+            status_by_id = self.db.get_matter_budget_status_batch(matter_ids)
             over: list[tuple[int, str, dict]] = []
             near: list[tuple[int, str, dict]] = []
             for mid, path in timer_matters:
-                status = self.db.get_matter_budget_status(mid)
+                status = status_by_id.get(mid, {})
                 if status.get("over_budget"):
                     over.append((mid, path, status))
                 elif status.get("near_budget"):
@@ -492,6 +527,7 @@ class SentinelApp:
             dismissed = (page.data or {}).get("timer_near_budget_dismissed", False)
             if dismissed or not combined:
                 near_budget_banner_ref.current.visible = False
+                near_budget_banner_ref.current.update()
                 return
             budget_in = combined[0][2].get("budget_in")
             budget_in_suffix = f" (Budget in {budget_in})" if budget_in else ""
@@ -513,7 +549,7 @@ class SentinelApp:
                     page.data = {}
                 page.data["timer_near_budget_dismissed"] = True
                 near_budget_banner_ref.current.visible = False
-                page.update()
+                near_budget_banner_ref.current.update()
 
             near_budget_banner_ref.current.content = ft.Row(
                 [
@@ -531,6 +567,7 @@ class SentinelApp:
                 tight=True,
             )
             near_budget_banner_ref.current.visible = True
+            near_budget_banner_ref.current.update()
 
         def refresh_timer_matter_list():
             nonlocal options, options_all
@@ -547,8 +584,10 @@ class SentinelApp:
             if timer_matter_list_ref.current:
                 q = timer_matter_search_ref.current.value if timer_matter_search_ref.current else ""
                 timer_matter_list_ref.current.controls = _build_timer_matter_list(q)
+                timer_matter_list_ref.current.update()
+            if timer_matter_selection_ref.current:
+                timer_matter_selection_ref.current.update()
             _update_near_budget_banner()
-            page.update()
 
         if page.data is None:
             page.data = {}
@@ -573,11 +612,12 @@ class SentinelApp:
             entries = self.db.get_time_entries_for_day(selected_day[0])
             path_options = self.db.get_matters_with_full_paths(for_timer=True)
             path_by_id = {mid: path for mid, path in path_options}
+            rates_by_key = self.db.get_resolved_hourly_rates_batch(entries)
 
             def _refresh_activities():
                 if activities_list_ref.current:
                     activities_list_ref.current.controls = _build_activities_rows()
-                    page.update()
+                    activities_list_ref.current.update()
 
             rows: list[ft.Control] = []
             for entry in entries:
@@ -606,7 +646,7 @@ class SentinelApp:
                 start_tf = ft.TextField(value=start_val, width=90, on_blur=lambda e, eid=entry_id: _on_activity_start_blur(eid, e.control.value))
                 end_tf = ft.TextField(value=end_val, width=90, on_blur=lambda e, eid=entry_id: _on_activity_end_blur(eid, e.control.value))
                 duration_tf = ft.TextField(value=duration_val, width=100, on_blur=lambda e, eid=entry_id: _on_activity_duration_blur(eid, e.control.value))
-                rate, rate_source = self.db.get_resolved_hourly_rate(entry.matter_id, entry.owner_id)
+                rate, rate_source = rates_by_key.get((entry.matter_id, entry.owner_id), (0.0, "user"))
                 amount_eur = self.db.amount_eur_from_seconds(dur_sec, rate)
                 amount_color = _rate_source_color(rate_source)
                 amount_text = ft.Text(format_eur(amount_eur), size=12, color=amount_color, width=90)
@@ -624,7 +664,7 @@ class SentinelApp:
                     page.update()
 
                 def _on_activity_start_blur(eid: int, s: str):
-                    entry = next((x for x in self.db.get_time_entries_for_day(selected_day[0]) if x.id == eid), None)
+                    entry = self.db.get_time_entry(eid)
                     if not entry:
                         return
                     t = parse_time(s or "")
@@ -650,7 +690,7 @@ class SentinelApp:
                     page.update()
 
                 def _on_activity_end_blur(eid: int, s: str):
-                    entry = next((x for x in self.db.get_time_entries_for_day(selected_day[0]) if x.id == eid), None)
+                    entry = self.db.get_time_entry(eid)
                     if not entry:
                         return
                     if (s or "").strip() in ("", "—", "Running"):
@@ -681,7 +721,7 @@ class SentinelApp:
                     page.update()
 
                 def _on_activity_duration_blur(eid: int, s: str):
-                    entry = next((x for x in self.db.get_time_entries_for_day(selected_day[0]) if x.id == eid), None)
+                    entry = self.db.get_time_entry(eid)
                     if not entry:
                         return
                     hours = parse_duration_hours(s or "")
@@ -773,10 +813,12 @@ class SentinelApp:
             return [header] + rows
 
         def refresh_activities():
+            if page.data is not None:
+                page.data["reporting_stale"] = True
             if activities_list_ref.current:
                 activities_list_ref.current.controls = _build_activities_rows()
+                activities_list_ref.current.update()
             _update_near_budget_banner()
-            page.update()
 
         def _set_selected_day(new_day: date) -> None:
             """Update selected_day state, header label, field, and refresh list."""
@@ -802,7 +844,7 @@ class SentinelApp:
             new_day = picker_value_to_local_date(new_val)
             if new_day is not None and change_date_field_ref.current:
                 change_date_field_ref.current.value = new_day.isoformat()
-                page.update()
+                change_date_field_ref.current.update()
 
         page.data["refresh_timer_activities"] = refresh_activities
 
@@ -842,9 +884,7 @@ class SentinelApp:
 
         def open_activity_change_date_dialog(entry_id: int) -> None:
             """Allow changing only the calendar day for a time entry (time of day preserved)."""
-            # Only look in entries for the currently selected day (this menu is only shown there)
-            entries_for_day = self.db.get_time_entries_for_day(selected_day[0])
-            entry = next((x for x in entries_for_day if x.id == entry_id), None)
+            entry = self.db.get_time_entry(entry_id)
             if not entry:
                 page.snack_bar = ft.SnackBar(ft.Text("Time entry not found."), open=True)
                 page.update()
@@ -1052,7 +1092,7 @@ class SentinelApp:
                 elapsed = (datetime.now() - start_time_ref[0]).total_seconds()
                 if timer_label.current:
                     timer_label.current.value = format_elapsed(elapsed)
-                    page.update()
+                    timer_label.current.update()
 
         def _get_selected_matter_id() -> int | None:
             """Return selected matter id from the matter list (same for timer and manual)."""
@@ -1168,7 +1208,7 @@ class SentinelApp:
                 manual_derived_ref.current.value = "Fill exactly two of Start, End, Duration; the third will be shown here."
             else:
                 manual_derived_ref.current.value = f"Derived: Start {format_datetime(start_t)}, End {format_datetime(end_t)}, Duration {format_elapsed(dur)}"
-            page.update()
+            manual_derived_ref.current.update()
 
         def on_manual_add(_):
             matter_id = _get_selected_matter_id()
@@ -1210,12 +1250,23 @@ class SentinelApp:
         start_btn.on_click = on_start
         stop_btn.on_click = on_stop
 
+        def _safe_update(ctrl):
+            """Update control only if it has been added to the page."""
+            if ctrl is None:
+                return
+            try:
+                ctrl.update()
+            except RuntimeError:
+                pass  # Control not on page yet (e.g. during initial build)
+
         def _set_mode(manual: bool):
             manual_mode[0] = manual
             if timer_section_ref.current:
                 timer_section_ref.current.visible = not manual
+                _safe_update(timer_section_ref.current)
             if manual_section_ref.current:
                 manual_section_ref.current.visible = manual
+                _safe_update(manual_section_ref.current)
             if manual_btn_ref.current:
                 manual_btn_ref.current.icon = (
                     ft.Icons.CHECK if manual_mode[0] else ft.Icons.EDIT_NOTE
@@ -1228,7 +1279,7 @@ class SentinelApp:
                     if manual_mode[0]
                     else None
                 )
-            page.update()
+                _safe_update(manual_btn_ref.current)
 
         # Expose mode setter so other callbacks (e.g. Continue task) can force timer mode.
         (page.data or {})["_timer_set_mode_callback"] = _set_mode
@@ -1449,6 +1500,8 @@ class SentinelApp:
             return by_client
     
         def _build_list_controls(by_client: dict):
+            all_mids = [mid for items in by_client.values() for mid, _, _, _ in items]
+            budget_status_by_id = self.db.get_matter_budget_status_batch(all_mids)
             controls = []
             for client_name in sorted(by_client.keys()):
                 items = by_client[client_name]
@@ -1466,7 +1519,7 @@ class SentinelApp:
                 menu_items_builder = []
                 for mid, path, code, is_owner in items:
                     display_path = path if is_owner else f"{path} (shared)"
-                    budget_status = self.db.get_matter_budget_status(mid)
+                    budget_status = budget_status_by_id.get(mid, {})
                     leading_icon = None
                     if budget_status.get("budget_eur") is not None and budget_status["budget_eur"] > 0:
                         total = budget_status["total_eur"]
@@ -1608,15 +1661,16 @@ class SentinelApp:
             move_expanded.symmetric_difference_update([client_name])
             if move_list_ref.current:
                 move_list_ref.current.controls = _build_move_list_controls(move_search_ref.current.value if move_search_ref.current else "")
-                page.update()
+                move_list_ref.current.update()
     
         def _on_move_select(pid, ptext):
             move_selected_ref[0] = (pid, ptext)
             if move_selection_text_ref.current:
                 move_selection_text_ref.current.value = f"Selected: {ptext}"
+                move_selection_text_ref.current.update()
             if move_list_ref.current:
                 move_list_ref.current.controls = _build_move_list_controls(move_search_ref.current.value if move_search_ref.current else "")
-                page.update()
+                move_list_ref.current.update()
     
         def _build_merge_list_controls(query: str):
             by_client = _options_by_client(merge_options_data, include_root=False)
@@ -1667,25 +1721,26 @@ class SentinelApp:
             merge_expanded.symmetric_difference_update([client_name])
             if merge_list_ref.current:
                 merge_list_ref.current.controls = _build_merge_list_controls(merge_search_ref.current.value if merge_search_ref.current else "")
-                page.update()
+                merge_list_ref.current.update()
     
         def _on_merge_select(pid, ptext):
             merge_selected_ref[0] = (pid, ptext)
             if merge_selection_text_ref.current:
                 merge_selection_text_ref.current.value = f"Selected: {ptext}"
+                merge_selection_text_ref.current.update()
             if merge_list_ref.current:
                 merge_list_ref.current.controls = _build_merge_list_controls(merge_search_ref.current.value if merge_search_ref.current else "")
-                page.update()
-    
+                merge_list_ref.current.update()
+
         def on_move_search(e):
             if move_list_ref.current and move_search_ref.current:
                 move_list_ref.current.controls = _build_move_list_controls(e.control.value or "")
-                page.update()
-    
+                move_list_ref.current.update()
+
         def on_merge_search(e):
             if merge_list_ref.current and merge_search_ref.current:
                 merge_list_ref.current.controls = _build_merge_list_controls(e.control.value or "")
-                page.update()
+                merge_list_ref.current.update()
     
         def open_move_dialog(mid: int, path: str):
             move_source[0], move_source[1] = mid, path
@@ -1793,7 +1848,7 @@ class SentinelApp:
         def refresh_share_list():
             if share_list_ref.current:
                 share_list_ref.current.controls = _build_share_list_controls()
-            page.update()
+                share_list_ref.current.update()
     
         def open_share_dialog(mid: int, path: str):
             share_matter_id_holder[0] = mid
@@ -2629,6 +2684,7 @@ class SentinelApp:
 
         path_list = self.db.get_matters_with_full_paths()
         matter_id_by_path = {path: mid for mid, path in path_list}
+        budget_status_by_id = self.db.get_matter_budget_status_batch(list(matter_id_by_path.values()))
         by_client: dict[str, list[tuple[str, float, float, float, float, str]]] = defaultdict(list)
         for row in rows_data:
             client_name, matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_inv_amount_eur, rate_source = row
@@ -2662,11 +2718,11 @@ class SentinelApp:
             reverse=True,
         )
 
-        def _reporting_matter_row(matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_inv_amount_eur, rate_source, matter_id_by_path):
+        def _reporting_matter_row(matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_inv_amount_eur, rate_source, matter_id_by_path, budget_status_by_id):
             mid = matter_id_by_path.get(matter_path)
             budget_parts = []
             if mid:
-                status = self.db.get_matter_budget_status(mid)
+                status = budget_status_by_id.get(mid, {})
                 if status.get("budget_eur") is not None and status["budget_eur"] > 0:
                     budget = status["budget_eur"]
                     pct = int((status.get("ratio") or 0) * 100)
@@ -2751,7 +2807,7 @@ class SentinelApp:
                         ft.Container(
                             content=ft.Column(
                                 [
-                                    _reporting_matter_row(matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_inv_amount_eur, rate_source, matter_id_by_path)
+                                    _reporting_matter_row(matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_inv_amount_eur, rate_source, matter_id_by_path, budget_status_by_id)
                                     for (matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_inv_amount_eur, rate_source) in sorted(
                                         matter_rows, key=lambda r: r[0]
                                     )
@@ -2870,9 +2926,11 @@ class SentinelApp:
             path_list = self.db.get_matters_with_full_paths(
                 include_all_users=current_user_is_admin
             )
+            all_mids = [mid for mid, _ in path_list]
+            budget_status_by_id = self.db.get_matter_budget_status_batch(all_mids)
             q = (query or "").strip().lower()
             def _timesheet_budget_trailing(mid: int):
-                status = self.db.get_matter_budget_status(mid)
+                status = budget_status_by_id.get(mid, {})
                 if status.get("budget_eur") is None or status["budget_eur"] <= 0:
                     return None
                 total = status["total_eur"]
