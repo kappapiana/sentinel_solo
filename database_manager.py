@@ -688,6 +688,39 @@ class DatabaseManager:
                 matter.budget_threshold = budget_threshold
             session.commit()
 
+    def _build_full_paths_batch(
+        self, session: Session, matters: list[Matter], ancestor_query=None
+    ) -> dict[int, str]:
+        """Build full paths for all matters in-memory (no per-ancestor DB calls).
+        If ancestor_query is provided, load missing ancestors (e.g. when visible matters
+        are a subset and parents are owned by others, as with shared matters)."""
+        by_id = {m.id: m for m in matters}
+        if ancestor_query is not None:
+            missing = {m.parent_id for m in matters if m.parent_id is not None and m.parent_id not in by_id}
+            while missing:
+                ancestors = ancestor_query.filter(Matter.id.in_(missing)).all()
+                for a in ancestors:
+                    by_id[a.id] = a
+                    missing.discard(a.id)
+                if not ancestors:
+                    break
+                missing = {a.parent_id for a in ancestors if a.parent_id and a.parent_id not in by_id}
+        cache: dict[int, str] = {}
+
+        def path(m: Matter) -> str:
+            if m.id in cache:
+                return cache[m.id]
+            if m.parent_id is None:
+                cache[m.id] = m.name
+                return cache[m.id]
+            p = by_id.get(m.parent_id)
+            cache[m.id] = f"{path(p)} > {m.name}" if p else m.name
+            return cache[m.id]
+
+        for m in matters:
+            path(m)
+        return cache
+
     def get_matters_with_full_paths(
         self,
         for_timer: bool = False,
@@ -707,10 +740,14 @@ class DatabaseManager:
                 q = session.query(Matter).order_by(Matter.matter_code)
             else:
                 q = self._matter_query(session).order_by(Matter.matter_code)
+            all_matters = q.all()
+            ancestor_q = session.query(Matter)
+            paths = self._build_full_paths_batch(session, all_matters, ancestor_q)
             if for_timer:
-                q = q.filter(Matter.parent_id.isnot(None))
-            matters = q.all()
-            return [(m.id, m.get_full_path(session)) for m in matters]
+                matters = [m for m in all_matters if m.parent_id is not None]
+            else:
+                matters = all_matters
+            return [(m.id, paths[m.id]) for m in matters]
 
     def get_all_matters(self) -> list[Matter]:
         """Return all matters (for Manage Matters tab)."""
@@ -861,6 +898,46 @@ class DatabaseManager:
                 .all()
             )
 
+    def get_time_entry(self, entry_id: int) -> TimeEntry | None:
+        """Return a single time entry by id, or None if not found or not visible."""
+        self._require_user()
+        with self._session() as session:
+            return (
+                self._time_entry_query(session)
+                .filter(TimeEntry.id == entry_id)
+                .first()
+            )
+
+    def get_resolved_hourly_rates_batch(
+        self, entries: list
+    ) -> dict[tuple[int, int], tuple[float, Literal["user_matter", "matter", "upper_matter", "user"]]]:
+        """Return {(matter_id, owner_id): (rate, source)} for all unique (matter_id, owner_id) in entries. Single session."""
+        if not entries:
+            return {}
+        keys = list({(e.matter_id, e.owner_id) for e in entries})
+        matter_ids = list({k[0] for k in keys})
+        self._require_user()
+        with self._session() as session:
+            mq = self._matter_query(session)
+            matters = mq.filter(Matter.id.in_(matter_ids)).all()
+            matter_by_id = {m.id: m for m in matters}
+            missing = {m.parent_id for m in matters if m.parent_id and m.parent_id not in matter_by_id}
+            while missing:
+                ancestors = session.query(Matter).filter(Matter.id.in_(missing)).all()
+                for a in ancestors:
+                    matter_by_id[a.id] = a
+                    missing.discard(a.id)
+                if not ancestors:
+                    break
+                missing = {a.parent_id for a in ancestors if a.parent_id and a.parent_id not in matter_by_id}
+            result: dict[tuple[int, int], tuple[float, str]] = {}
+            for matter_id, owner_id in keys:
+                matter = matter_by_id.get(matter_id)
+                oid = owner_id if owner_id is not None else self._current_user_id
+                rate, source = self._resolve_hourly_rate_in_session(session, matter, oid, mq)
+                result[(matter_id, owner_id)] = (rate, source)
+            return result
+
     def get_descendant_matter_ids(
         self, matter_id: int, *, include_all_users: bool = False
     ) -> set[int]:
@@ -931,10 +1008,13 @@ class DatabaseManager:
                 matter_query = session.query(Matter)
             else:
                 matter_query = self._matter_query(session)
+            matters = matter_query.all()
+            paths = self._build_full_paths_batch(session, matters, session.query(Matter))
+            matter_by_id = {m.id: m for m in matters}
             result = []
             for e in entries:
-                matter = matter_query.filter(Matter.id == e.matter_id).first()
-                path = matter.get_full_path(session) if matter else ""
+                matter = matter_by_id.get(e.matter_id)
+                path = paths.get(e.matter_id, "") if matter else ""
                 rate, rate_source = self._resolve_hourly_rate_in_session(
                     session, matter, e.owner_id, matter_query
                 )
@@ -1283,6 +1363,17 @@ class DatabaseManager:
                 return matter.name
         return current.name
 
+    def _get_root_matter_name_with_map(
+        self, matter: Matter, matter_by_id: dict[int, Matter]
+    ) -> str:
+        """Like _get_root_matter_name but uses preloaded matter_by_id (no DB calls)."""
+        current = matter
+        while current.parent_id is not None:
+            current = matter_by_id.get(current.parent_id)
+            if current is None:
+                return matter.name
+        return current.name
+
     def get_resolved_hourly_rate(
         self, matter_id: int, owner_id: int | None = None
     ) -> tuple[float, Literal["user_matter", "matter", "upper_matter", "user"]]:
@@ -1316,6 +1407,25 @@ class DatabaseManager:
             if current.parent_id is None:
                 break
             current = mq.filter(Matter.id == current.parent_id).first()
+        if not candidates:
+            return (None, None)
+        best = min(candidates, key=lambda x: x[0])
+        return (best[0], best[1])
+
+    def _effective_budget_for_matter_with_map(
+        self, matter: Matter, matter_by_id: dict[int, Matter], paths: dict[int, str]
+    ) -> tuple[float | None, str | None]:
+        """Like _effective_budget_for_matter but uses preloaded matter_by_id and paths (no DB calls)."""
+        candidates: list[tuple[float, str]] = []
+        current = matter
+        while current is not None:
+            b = getattr(current, "budget_eur", None)
+            if b is not None and b > 0:
+                path = paths.get(current.id, current.name)
+                candidates.append((float(b), path))
+            if current.parent_id is None:
+                break
+            current = matter_by_id.get(current.parent_id)
         if not candidates:
             return (None, None)
         best = min(candidates, key=lambda x: x[0])
@@ -1375,6 +1485,90 @@ class DatabaseManager:
         result["near_budget"] = threshold <= ratio < 1.0
         result["over_budget"] = ratio >= 1.0
         return result
+
+    def get_matter_budget_status_batch(
+        self, matter_ids: list[int]
+    ) -> dict[int, dict]:
+        """
+        Return {matter_id: status_dict} for all matter_ids in one pass.
+        status_dict has same shape as get_matter_budget_status.
+        """
+        if not matter_ids:
+            return {}
+        self._require_user()
+        with self._session() as session:
+            mq = self._matter_query(session)
+            matters = mq.filter(Matter.id.in_(matter_ids)).all()
+            if not matters:
+                return {mid: self.get_matter_budget_status(mid) for mid in matter_ids}
+            matter_by_id = {m.id: m for m in matters}
+            missing = {m.parent_id for m in matters if m.parent_id and m.parent_id not in matter_by_id}
+            while missing:
+                ancestors = session.query(Matter).filter(Matter.id.in_(missing)).all()
+                for a in ancestors:
+                    matter_by_id[a.id] = a
+                    missing.discard(a.id)
+                if not ancestors:
+                    break
+                missing = {a.parent_id for a in ancestors if a.parent_id and a.parent_id not in matter_by_id}
+            all_matters = list(matter_by_id.values())
+            paths = self._build_full_paths_batch(session, all_matters, session.query(Matter))
+            entries = (
+                self._time_entry_query(session)
+                .filter(
+                    TimeEntry.matter_id.in_(matter_ids),
+                    TimeEntry.end_time.isnot(None),
+                )
+                .all()
+            )
+            total_eur_by_matter: dict[int, float] = {mid: 0.0 for mid in matter_ids}
+            for e in entries:
+                matter = matter_by_id.get(e.matter_id)
+                rate, _ = self._resolve_hourly_rate_in_session(
+                    session, matter, e.owner_id, mq
+                )
+                dur = e.duration_seconds or 0.0
+                total_eur_by_matter[e.matter_id] = (
+                    total_eur_by_matter.get(e.matter_id, 0.0)
+                    + self.amount_eur_from_seconds(dur, rate)
+                )
+            result: dict[int, dict] = {}
+            for mid in matter_ids:
+                matter = matter_by_id.get(mid)
+                if matter is None:
+                    result[mid] = {
+                        "total_eur": 0.0,
+                        "budget_eur": None,
+                        "threshold": 0.8,
+                        "budget_in": None,
+                        "ratio": None,
+                        "near_budget": False,
+                        "over_budget": False,
+                    }
+                    continue
+                total_eur = round(total_eur_by_matter.get(mid, 0.0), 2)
+                budget_eur, budget_in_path = self._effective_budget_for_matter_with_map(
+                    matter, matter_by_id, paths
+                )
+                threshold = getattr(matter, "budget_threshold", None)
+                if threshold is None:
+                    threshold = 0.8
+                status: dict = {
+                    "total_eur": total_eur,
+                    "budget_eur": budget_eur,
+                    "threshold": float(threshold),
+                    "budget_in": budget_in_path,
+                    "ratio": None,
+                    "near_budget": False,
+                    "over_budget": False,
+                }
+                if budget_eur is not None and budget_eur > 0:
+                    ratio = total_eur / budget_eur
+                    status["ratio"] = round(ratio, 4)
+                    status["near_budget"] = threshold <= ratio < 1.0
+                    status["over_budget"] = ratio >= 1.0
+                result[mid] = status
+            return result
 
     @staticmethod
     def amount_eur_from_seconds(duration_seconds: float, rate: float) -> float:
@@ -1449,9 +1643,12 @@ class DatabaseManager:
         self._require_user()
         with self._session() as session:
             q = self._matter_query(session).order_by(Matter.matter_code)
+            all_matters = q.all()
+            paths = self._build_full_paths_batch(session, all_matters, session.query(Matter))
             if for_timer:
-                q = q.filter(Matter.parent_id.isnot(None))
-            matters = q.all()
+                matters = [m for m in all_matters if m.parent_id is not None]
+            else:
+                matters = all_matters
             result: list[tuple[int | None, str]] = (
                 [(None, "— Root (new client) —")] if include_root_option else []
             )
@@ -1460,7 +1657,7 @@ class DatabaseManager:
                     continue
                 if self._is_descendant_of(session, m.id, exclude_matter_id):
                     continue
-                result.append((m.id, m.get_full_path(session)))
+                result.append((m.id, paths[m.id]))
             return result
 
     def move_matter(self, matter_id: int, new_parent_id: int | None) -> None:
@@ -1762,8 +1959,9 @@ class DatabaseManager:
             matters = (
                 session.query(Matter).filter(Matter.owner_id == user_id).all()
             )
+            paths = self._build_full_paths_batch(session, matters, session.query(Matter))
             for m in matters:
-                path = m.get_full_path(session)
+                path = paths[m.id]
                 if path == full_path:
                     return (m.id, path)
             return None
@@ -1786,15 +1984,30 @@ class DatabaseManager:
                 end_dt = datetime.combine(date_to, datetime.max.time())
                 q = q.filter(TimeEntry.start_time <= end_dt)
             entries = q.all()
+            matter_ids = list({e.matter_id for e in entries})
+            if not matter_ids:
+                return []
+            mq = self._matter_query(session)
+            matters = mq.filter(Matter.id.in_(matter_ids)).all()
+            matter_by_id = {m.id: m for m in matters}
+            missing = {m.parent_id for m in matters if m.parent_id and m.parent_id not in matter_by_id}
+            while missing:
+                ancestors = session.query(Matter).filter(Matter.id.in_(missing)).all()
+                for a in ancestors:
+                    matter_by_id[a.id] = a
+                    missing.discard(a.id)
+                if not ancestors:
+                    break
+                missing = {a.parent_id for a in ancestors if a.parent_id and a.parent_id not in matter_by_id}
+            all_matters = list(matter_by_id.values())
+            paths = self._build_full_paths_batch(session, all_matters, session.query(Matter))
             agg: dict[tuple[str, str], float] = {}
             for entry in entries:
-                matter = self._matter_query(session).filter(
-                    Matter.id == entry.matter_id
-                ).first()
+                matter = matter_by_id.get(entry.matter_id)
                 if matter is None:
                     continue
-                client_name = self._get_root_matter_name(session, matter)
-                full_path = matter.get_full_path(session)
+                client_name = self._get_root_matter_name_with_map(matter, matter_by_id)
+                full_path = paths.get(entry.matter_id, matter.name)
                 key = (client_name, full_path)
                 agg[key] = agg.get(key, 0.0) + (entry.duration_seconds or 0.0)
             result = [(client, path, total) for (client, path), total in agg.items()]
@@ -1819,31 +2032,50 @@ class DatabaseManager:
                 end_dt = datetime.combine(date_to, datetime.max.time())
                 q = q.filter(TimeEntry.start_time <= end_dt)
             entries = q.all()
+            matter_ids = list({e.matter_id for e in entries})
+            if not matter_ids:
+                return []
+            mq = self._matter_query(session)
+            matters = mq.filter(Matter.id.in_(matter_ids)).all()
+            matter_by_id = {m.id: m for m in matters}
+            missing = {m.parent_id for m in matters if m.parent_id and m.parent_id not in matter_by_id}
+            while missing:
+                ancestors = session.query(Matter).filter(Matter.id.in_(missing)).all()
+                for a in ancestors:
+                    matter_by_id[a.id] = a
+                    missing.discard(a.id)
+                if not ancestors:
+                    break
+                missing = {a.parent_id for a in ancestors if a.parent_id and a.parent_id not in matter_by_id}
+            all_matters = list(matter_by_id.values())
+            paths = self._build_full_paths_batch(session, all_matters, session.query(Matter))
             agg_total: dict[tuple[str, str], float] = {}
             agg_not_invoiced: dict[tuple[str, str], float] = {}
             matter_id_by_key: dict[tuple[str, str], int] = {}
-            mq = self._matter_query(session)
             for entry in entries:
-                matter = mq.filter(Matter.id == entry.matter_id).first()
+                matter = matter_by_id.get(entry.matter_id)
                 if matter is None:
                     continue
-                client_name = self._get_root_matter_name(session, matter)
-                full_path = matter.get_full_path(session)
+                client_name = self._get_root_matter_name_with_map(matter, matter_by_id)
+                full_path = paths.get(entry.matter_id, matter.name)
                 key = (client_name, full_path)
                 matter_id_by_key[key] = matter.id
                 sec = entry.duration_seconds or 0.0
                 agg_total[key] = agg_total.get(key, 0.0) + sec
                 if not entry.invoiced:
                     agg_not_invoiced[key] = agg_not_invoiced.get(key, 0.0) + sec
+            rate_cache: dict[int, tuple[float, str]] = {}
             result = []
             for (client, path) in agg_total:
                 total_sec = agg_total.get((client, path), 0.0)
                 not_inv_sec = agg_not_invoiced.get((client, path), 0.0)
                 mid = matter_id_by_key.get((client, path))
-                matter = mq.filter(Matter.id == mid).first() if mid else None
-                rate, rate_source = self._resolve_hourly_rate_in_session(
-                    session, matter, self._current_user_id, mq
-                )
+                if mid not in rate_cache:
+                    matter = matter_by_id.get(mid)
+                    rate_cache[mid] = self._resolve_hourly_rate_in_session(
+                        session, matter, self._current_user_id, mq
+                    )
+                rate, rate_source = rate_cache[mid]
                 total_amount_eur = self.amount_eur_from_seconds(total_sec, rate)
                 not_inv_amount_eur = self.amount_eur_from_seconds(not_inv_sec, rate)
                 result.append(
