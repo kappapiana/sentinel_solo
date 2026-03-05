@@ -5,6 +5,7 @@
 --   Login / first run: has_any_user, get_login_credentials, create_first_admin
 --   Admin check:      current_user_is_admin, get_current_user_info, get_user_is_admin
 --   User admin:       list_users, get_user, create_user, update_user, delete_user
+--   Sharing / merge:  list_users_for_share, get_owned_matter_paths, merge_other_matter_into
 --
 -- Usage: psql -U postgres -d YOUR_DATABASE -f scripts/postgres_bootstrap_login.sql
 --        (or from the server: sudo -u postgres psql -d timesheets -f /path/to/scripts/postgres_bootstrap_login.sql)
@@ -153,6 +154,58 @@ BEGIN
     RAISE EXCEPTION 'Only admin can delete users.';
   END IF;
   DELETE FROM public.users WHERE id = p_user_id;
+END
+$$;
+
+-- Return (id, username) for all users (for share dropdown). Any user can call; SECURITY DEFINER bypasses RLS.
+CREATE OR REPLACE FUNCTION app.list_users_for_share(p_caller_id int)
+RETURNS TABLE(id int, username text) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
+AS $$
+  SELECT u.id, u.username FROM public.users u ORDER BY u.username
+$$;
+
+-- Return (matter_id, path) for all matters owned by p_user_id (recursive full path). Used for same-name conflict when sharing.
+CREATE OR REPLACE FUNCTION app.get_owned_matter_paths(p_user_id int)
+RETURNS TABLE(matter_id int, path text) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
+AS $$
+  WITH RECURSIVE paths AS (
+    SELECT m.id AS node_id, m.name AS path
+    FROM public.matters m
+    WHERE m.owner_id = p_user_id AND m.parent_id IS NULL
+    UNION ALL
+    SELECT m.id, p.path || ' > ' || m.name
+    FROM public.matters m
+    JOIN paths p ON m.parent_id = p.node_id
+    WHERE m.owner_id = p_user_id
+  )
+  SELECT node_id AS matter_id, path FROM paths
+$$;
+
+-- Merge source matter into target (caller must own target). Returns error message or NULL on success.
+CREATE OR REPLACE FUNCTION app.merge_other_matter_into(p_caller_id int, p_src_id int, p_tgt_id int)
+RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE
+  tgt_owner int;
+  src_rec record;
+BEGIN
+  SELECT owner_id INTO tgt_owner FROM public.matters WHERE id = p_tgt_id;
+  IF tgt_owner IS NULL OR tgt_owner != p_caller_id THEN
+    RETURN 'Target matter not found or not owned by you.';
+  END IF;
+  SELECT id, owner_id, parent_id INTO src_rec FROM public.matters WHERE id = p_src_id;
+  IF src_rec.id IS NULL THEN
+    RETURN 'Source matter not found.';
+  END IF;
+  IF p_src_id = p_tgt_id THEN
+    RETURN 'Cannot merge a matter into itself.';
+  END IF;
+  UPDATE public.time_entries SET matter_id = p_tgt_id WHERE matter_id = p_src_id;
+  UPDATE public.matters SET parent_id = p_tgt_id WHERE parent_id = p_src_id;
+  DELETE FROM public.matter_shares WHERE matter_id = p_src_id;
+  DELETE FROM public.user_matter_rates WHERE matter_id = p_src_id;
+  DELETE FROM public.matters WHERE id = p_src_id;
+  RETURN NULL;
 END
 $$;
 

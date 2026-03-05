@@ -1727,16 +1727,25 @@ class DatabaseManager:
             if target is None or target.owner_id != self._current_user_id:
                 raise ValueError("Target matter not found or not owned by you.")
             if self._engine.dialect.name == "postgresql":
-                row = session.execute(
-                    text(
-                        "SELECT app.merge_other_matter_into(:caller_id, :src_id, :tgt_id)"
-                    ),
-                    {
-                        "caller_id": self._current_user_id,
-                        "src_id": source_matter_id,
-                        "tgt_id": target_matter_id,
-                    },
-                ).fetchone()
+                try:
+                    row = session.execute(
+                        text(
+                            "SELECT app.merge_other_matter_into(:caller_id, :src_id, :tgt_id)"
+                        ),
+                        {
+                            "caller_id": self._current_user_id,
+                            "src_id": source_matter_id,
+                            "tgt_id": target_matter_id,
+                        },
+                    ).fetchone()
+                except ProgrammingError as exc:
+                    if "merge_other_matter_into" not in str(exc):
+                        raise
+                    session.rollback()
+                    raise RuntimeError(
+                        "PostgreSQL function app.merge_other_matter_into is missing. "
+                        "Re-run scripts/postgres_bootstrap_login.sql as a superuser."
+                    ) from exc
                 if row and row[0] is not None:
                     raise ValueError(row[0])
                 session.commit()
@@ -1875,19 +1884,13 @@ class DatabaseManager:
                     ).fetchall()
                 except ProgrammingError as exc:
                     # Older Postgres deployments may not have app.list_users_for_share yet.
-                    # Only fall back (and recover the transaction) when that specific
-                    # function is missing; otherwise re-raise.
                     if "list_users_for_share" not in str(exc):
                         raise
-                    # Clear the failed transaction before issuing another statement.
                     session.rollback()
-                    rows = session.execute(
-                        text(
-                            "SELECT id, username, password_hash, is_admin, default_hourly_rate_euro "
-                            "FROM app.list_users(:id)"
-                        ),
-                        {"id": self._current_user_id},
-                    ).fetchall()
+                    raise RuntimeError(
+                        "PostgreSQL function app.list_users_for_share is missing. "
+                        "Re-run scripts/postgres_bootstrap_login.sql as a superuser."
+                    ) from exc
                 return [(r[0], r[1]) for r in rows if r[0] != self._current_user_id]
         with self._session() as session:
             users = session.query(User).filter(User.id != self._current_user_id).order_by(User.username).all()

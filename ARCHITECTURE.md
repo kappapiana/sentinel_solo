@@ -78,7 +78,8 @@ All lists of matters (timer dropdown, matters tab, move/merge targets, timesheet
 
 Regression tests live under **tests/** and do not depend on a “modular” split of Auth/Reporting into separate packages:
 
-- **tests/test_database_manager.py** — Exercises `DatabaseManager` (matters, paths, owner filtering, reporting aggregation, rates, continue/delete time entry, backup/restore). Uses a temporary DB and two users; no UI.
+- **tests/test_database_manager.py** — Exercises `DatabaseManager` (matters, paths, owner filtering, reporting aggregation, rates, continue/delete time entry, matter budget, backup/restore, matter sharing, same-name conflict). Uses a temporary DB and two users; no UI.
+- **tests/test_date_picker.py** — Exercises `picker_value_to_local_date` (date/datetime conversion).
 - **tests/test_regression.py** — User/matter creation, path recursion, RLS (one user cannot see another’s matters), timer duration.
 
 Because Auth and Reporting are implemented inside `main.py` and `database_manager.py` (not as separate installable modules), the same test command continues to apply: run the full test suite with **`pytest tests/`** (or **`pytest`** from the project root). There is no `tests/test_logic.py`; the correct invocation is **`pytest tests/`** so that both `test_database_manager.py` and `test_regression.py` are executed. The regression-testing rule should reference this command so it remains valid for the current layout.
