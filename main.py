@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from database_manager import DatabaseManager, db
 from utils import picker_value_to_local_date
 
-__version__ = "v0.3.0"
+__version__ = "v0.3.1"
 
 # Storage keys for persisted login (optional restore)
 STORAGE_USER_ID = "user_id"
