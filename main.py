@@ -39,7 +39,7 @@ def _rate_source_color(source: str) -> str:
 
 
 def format_eur(amount: float) -> str:
-    """Format amount in EUR for display."""
+    """Format a numeric amount as a Euro string (e.g. '€ 12.34')."""
     return f"€ {amount:.2f}"
 
 
@@ -84,7 +84,7 @@ def parse_time(s: str) -> time | None:
 
 
 def parse_datetime(s: str) -> datetime | None:
-    """Parse YYYY-MM-DD HH:MM."""
+    """Parse ``YYYY-MM-DD HH:MM`` into a ``datetime``; return None on empty/invalid input."""
     s = (s or "").strip()
     if not s:
         return None
@@ -95,7 +95,12 @@ def parse_datetime(s: str) -> datetime | None:
 
 
 def parse_duration_hours(s: str) -> float | None:
-    """Parse duration as decimal hours (e.g. 1.5) or H:MM / HH:MM."""
+    """Parse a human-entered duration.
+
+    Accepts either decimal hours (e.g. ``1.5``) or ``H:MM`` / ``HH:MM`` and
+    returns the corresponding number of hours as a float. Returns None for
+    empty or invalid input.
+    """
     s = (s or "").strip()
     if not s:
         return None
@@ -111,7 +116,13 @@ def parse_duration_hours(s: str) -> float | None:
 
 
 def _compute_third_time_static(start_s: str, end_s: str, duration_s: str) -> tuple[datetime | None, datetime | None, float | None]:
-    """From two of start/end/duration (parsed), return (start, end, duration_seconds). Shared for timer and matters."""
+    """Given two of start/end/duration strings, compute the third.
+
+    This helper is shared by the timer and manual time-entry forms. It parses
+    the user-facing strings, infers the missing value, and returns a tuple of
+    ``(start_datetime, end_datetime, duration_seconds)``; if there is not
+    enough information, all three elements are ``None``.
+    """
     start = parse_datetime(start_s)
     end = parse_datetime(end_s)
     dur_h = parse_duration_hours(duration_s)
@@ -126,7 +137,20 @@ def _compute_third_time_static(start_s: str, end_s: str, duration_s: str) -> tup
 
 
 class SentinelApp:
-    """Flet UI: holds page, db, refs, and state; tab builders are methods."""
+    """Main Flet application for a logged-in user.
+
+    The app builds a dark-themed, navigation-rail UI with four primary areas:
+
+    - Timer: start/stop the running task, edit today's activities.
+    - Manage Matters: maintain the client/matter hierarchy and rates.
+    - Reporting: aggregated time and chargeable amounts by client and matter.
+    - Timesheet: select matters and export time entries, optionally marking
+      them as invoiced.
+
+    A per-user :class:`DatabaseManager` instance is injected and used by all
+    tabs; user preferences (such as reporting sort order and refresh callbacks)
+    are stored on ``page.data``.
+    """
 
     def __init__(self, page: ft.Page, db_instance: DatabaseManager) -> None:
         self.page = page

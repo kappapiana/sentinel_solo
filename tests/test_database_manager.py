@@ -1,11 +1,18 @@
 """
-Pytest suite for database_manager.py.
-Focus: hierarchical matter creation, get_full_path accuracy, RLS-style owner filtering,
-user admin (create/list/get/update/delete), backup/restore, require-user checks.
+Behavioural tests for :mod:`database_manager`.
 
-All tests use SQLite (conftest). PostgreSQL behaviour (RLS + app schema functions)
-is exercised by the same code paths when DATABASE_URL points at a Postgres DB
-that has been bootstrapped with scripts/postgres_bootstrap_login.sql.
+These tests exercise the high-level API used by the Flet UI:
+
+- Hierarchical matter creation and :meth:`Matter.get_full_path`.
+- RLS-style owner filtering (each user sees only their own / shared data).
+- User admin operations (create/list/get/update/delete).
+- Hourly rate resolution and reporting aggregation.
+- Backup/restore and ``current_user_id`` guard rails.
+
+All tests use SQLite (see ``conftest.py``). PostgreSQL behaviour (RLS policies
+and ``app`` schema helper functions) is exercised by the same code paths when
+``DATABASE_URL`` points at a Postgres DB that has been bootstrapped with
+``scripts/postgres_bootstrap_login.sql``.
 """
 from datetime import date, datetime, timedelta
 

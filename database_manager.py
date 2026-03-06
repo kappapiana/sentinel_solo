@@ -1,7 +1,21 @@
 """
-Database manager for Sentinel Solo: matters and time entries.
-Supports local SQLite (default) or remote PostgreSQL via DATABASE_URL.
-Multi-user: owner_id on matters/time_entries; Postgres RLS or SQLite filtering.
+Database manager for Sentinel Solo.
+
+This module owns the SQLAlchemy engine and session factory and exposes a
+high-level, user-scoped API for:
+
+- Creating and organising the Matter hierarchy (clients and matters).
+- Starting/stopping timers and managing TimeEntry rows.
+- Sharing matters between users and defining per-user hourly rates.
+- Aggregated reporting, timesheet export, and invoicing flags.
+- User and auth helpers (create first admin, list/update users, etc.).
+
+Backends:
+
+- SQLite (default): owner / sharing rules are implemented in application code.
+- PostgreSQL: the same rules are enforced with Row Level Security (RLS) using
+  helper functions under the ``app`` schema. The current user id is passed via
+  the ``app.current_user_id`` setting on each connection.
 """
 import os
 import re
@@ -21,7 +35,14 @@ from models import Base, Matter, MatterShare, TimeEntry, User, UserMatterRate
 
 
 class DatabaseManager:
-    """Database as an object: owns engine and sessions, exposes operations as methods."""
+    """High-level database façade used by the UI.
+
+    A ``DatabaseManager`` instance is created per logged-in user with
+    ``current_user_id`` set. All public methods that operate on matters and
+    time entries are therefore implicitly scoped to that user (and to any
+    matters shared with them), mirroring the privacy model described in
+    ``ARCHITECTURE.md``.
+    """
 
     def __init__(
         self,
@@ -941,8 +962,13 @@ class DatabaseManager:
     def get_descendant_matter_ids(
         self, matter_id: int, *, include_all_users: bool = False
     ) -> set[int]:
-        """Return the set of matter ids that are descendants of matter_id (children, grandchildren, etc.).
-        When include_all_users=True and current user is admin, includes descendants across all users (SQLite unscoped)."""
+        """Return all descendant matter ids for a given matter.
+
+        The result includes children, grandchildren, etc. For non-admin users
+        this is restricted to matters they can see (owned or shared). When
+        ``include_all_users=True`` and the current user is admin on SQLite, the
+        search runs across all users' matters.
+        """
         self._require_user()
         with self._session() as session:
             if (
@@ -1062,25 +1088,34 @@ class DatabaseManager:
     def export_full_database(self) -> dict:
         """
         Export full database as a portable JSON-serializable dict. Admin only.
-        Returns {"version": 1, "exported_at": "<iso>", "users": [...], "matters": [...], "time_entries": [...]}.
+
+        The payload has the shape::
+
+            {
+                "version": 1,
+                "exported_at": "<iso>",
+                "users": [...],
+                "matters": [...],
+                "time_entries": [...],
+                "matter_shares": [...],
+                "user_matter_rates": [...],
+            }
         """
         self._require_user()
         with self._session() as session:
             if not self._is_admin(session):
                 raise ValueError("Only admin can export the full database.")
-            # Unscoped reads (admin sees all via RLS on Postgres; on SQLite we use raw query)
-            if self._engine.dialect.name == "sqlite":
-                users = session.query(User).order_by(User.id).all()
-                matters = session.query(Matter).order_by(Matter.id).all()
-                entries = session.query(TimeEntry).order_by(TimeEntry.id).all()
-                shares = session.query(MatterShare).order_by(MatterShare.matter_id, MatterShare.user_id).all()
-                umr = session.query(UserMatterRate).order_by(UserMatterRate.user_id, UserMatterRate.matter_id).all()
-            else:
-                users = session.query(User).order_by(User.id).all()
-                matters = session.query(Matter).order_by(Matter.id).all()
-                entries = session.query(TimeEntry).order_by(TimeEntry.id).all()
-                shares = session.query(MatterShare).order_by(MatterShare.matter_id, MatterShare.user_id).all()
-                umr = session.query(UserMatterRate).order_by(UserMatterRate.user_id, UserMatterRate.matter_id).all()
+            # Admin sees all rows: on PostgreSQL RLS policies grant admin full
+            # SELECT access; on SQLite there is no RLS and we simply query all.
+            users = session.query(User).order_by(User.id).all()
+            matters = session.query(Matter).order_by(Matter.id).all()
+            entries = session.query(TimeEntry).order_by(TimeEntry.id).all()
+            shares = session.query(MatterShare).order_by(
+                MatterShare.matter_id, MatterShare.user_id
+            ).all()
+            umr = session.query(UserMatterRate).order_by(
+                UserMatterRate.user_id, UserMatterRate.matter_id
+            ).all()
         return {
             "version": self.BACKUP_VERSION,
             "exported_at": datetime.now().isoformat(),

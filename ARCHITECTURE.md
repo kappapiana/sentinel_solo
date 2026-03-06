@@ -4,8 +4,8 @@ This document describes how the application is structured and how its main funct
 
 ## Overview
 
-- **models.py** — SQLAlchemy models: `User`, `Matter` (hierarchy), `TimeEntry`. The Matter tree is the core domain (clients as roots, matters as children with unlimited nesting).
-- **database_manager.py** — Single entry point for all persistence. `DatabaseManager` is created with a `current_user_id`; all matter and time-entry operations are **owner-scoped** (RLS-style). Exposes APIs used by the UI.
+- **models.py** — SQLAlchemy models: `User`, `Matter` (hierarchy), `TimeEntry`, plus `MatterShare` and `UserMatterRate` for sharing and per-user rates. The Matter tree is the core domain (clients as roots, matters as children with unlimited nesting).
+- **database_manager.py** — Single entry point for all persistence. `DatabaseManager` is created with a `current_user_id`; all matter and time-entry operations are **owner-scoped** (RLS-style). Exposes APIs used by the UI (timer, matters, sharing, rates, reporting, backup/restore, users).
 - **main.py** — Flet UI: one `SentinelApp` instance per logged-in user, tab-based layout. Auth (login / create first admin) runs before the app; after login, a `DatabaseManager(current_user_id=user_id)` is created and passed into `SentinelApp`.
 
 There are no separate Python packages for “Auth” or “Reporting”; these are **logical modules** implemented as methods and helpers inside `main.py` and `database_manager.py`. The sections below describe how each area interacts with the Matter hierarchy and the DB.
@@ -15,8 +15,10 @@ There are no separate Python packages for “Auth” or “Reporting”; these a
 ## Core: Matter hierarchy
 
 - **Matter** has `parent_id` (self-FK). Roots (`parent_id is None`) are **clients**; non-roots are **matters** (projects, subprojects, etc.). Paths are built recursively via `Matter.get_full_path(session)` → e.g. `"Client A > Project X > Sub"`.
-- **TimeEntry** belongs to a **Matter** and an **User** (`owner_id`). Time can only be logged on non-root matters.
-- **User** has an optional `default_hourly_rate_euro`. Matter (and client) can have `hourly_rate_euro`; effective rate for a matter is resolved as matter → client → user (see database_manager rate APIs).
+- **TimeEntry** belongs to a **Matter** and an **User** (`owner_id`). Time can only be logged on non-root matters. Related entries can be grouped by `activity_group_id` (used by “Continue task” and timesheet aggregation).
+- **User** has an optional `default_hourly_rate_euro`. Matter (and client) can have `hourly_rate_euro`; effective rate for a matter is resolved as matter → ancestor client → user (see `DatabaseManager.get_resolved_hourly_rate` and `get_time_by_client_and_matter_detailed`).
+- **MatterShare** links a matter to additional users who can see it and log time on it (owner + shared users). Sharing is represented as rows in `matter_shares` and enforced in code and (for PostgreSQL) via RLS.
+- **UserMatterRate** stores per-user overrides for a given matter. When present, it takes precedence over the matter's own rate, any ancestor rate, and the user's default hourly rate.
 
 All lists of matters (timer dropdown, matters tab, move/merge targets, timesheet) use **full paths** from `DatabaseManager.get_matters_with_full_paths(for_timer=...)`, grouped by client (first path segment). The hierarchy is therefore central to every feature that displays or selects matters.
 
@@ -72,14 +74,32 @@ All lists of matters (timer dropdown, matters tab, move/merge targets, timesheet
 2. **SentinelApp** holds `self.db` and builds tabs that call `self.db.*` for all reads/writes. Matter hierarchy is never traversed in the UI; paths and aggregates come from `database_manager` (e.g. `get_matters_with_full_paths`, `get_time_by_client_and_matter_detailed`).
 3. **Shared state:** `page.data` holds UI preferences (e.g. `reporting_sort`, refresh callbacks). Reporting and Timesheet both read `reporting_sort` so client ordering is consistent.
 
+### Visual overview
+
+The diagram below shows the main data flow between the UI and the database layer:
+
+```mermaid
+flowchart TD
+  user[User] --> uiLogin[UILogin]
+  uiLogin --> dbLogin["DatabaseManager.get_login_credentials"]
+  user --> sentinelApp[SentinelApp]
+  sentinelApp --> dbMatters["DatabaseManager (matters/time)"]
+  dbMatters --> matters[Matters]
+  dbMatters --> timeEntries[TimeEntries]
+  sentinelApp --> reportingTab[ReportingTab]
+  sentinelApp --> timesheetTab[TimesheetTab]
+  reportingTab --> dbReporting["DatabaseManager.get_time_by_client_and_matter_detailed"]
+  timesheetTab --> dbExport["DatabaseManager.get_time_entries_for_export"]
+```
+
 ---
 
 ## Regression tests and this setup
 
 Regression tests live under **tests/** and do not depend on a “modular” split of Auth/Reporting into separate packages:
 
-- **tests/test_database_manager.py** — Exercises `DatabaseManager` (matters, paths, owner filtering, reporting aggregation, rates, continue/delete time entry, matter budget, backup/restore, matter sharing, same-name conflict). Uses a temporary DB and two users; no UI.
+- **tests/test_database_manager.py** — Behavioural tests for `DatabaseManager` (matters, paths, owner filtering, sharing, reporting aggregation, rates, continue/delete time entry, matter budget, backup/restore, matter sharing, same-name conflict, require-user checks). Uses a temporary DB and two users; no UI.
 - **tests/test_date_picker.py** — Exercises `picker_value_to_local_date` (date/datetime conversion).
-- **tests/test_regression.py** — User/matter creation, path recursion, RLS (one user cannot see another’s matters), timer duration.
+- **tests/test_regression.py** — High-level regression tests that mirror the flows above: user/matter creation, path recursion, privacy/RLS checks (one user cannot see another’s matters), timer duration.
 
 Because Auth and Reporting are implemented inside `main.py` and `database_manager.py` (not as separate installable modules), the same test command continues to apply: run the full test suite with **`pytest tests/`** (or **`pytest`** from the project root). There is no `tests/test_logic.py`; the correct invocation is **`pytest tests/`** so that both `test_database_manager.py` and `test_regression.py` are executed. The regression-testing rule should reference this command so it remains valid for the current layout.

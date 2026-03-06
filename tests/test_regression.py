@@ -1,7 +1,13 @@
 """
-Regression tests for database_manager.
-Covers: User and Matter creation, get_full_path recursion, privacy/RLS (one user cannot see another's matters),
-and timer start/stop with correct duration calculation.
+High-level regression tests for the database layer.
+
+These tests mirror the flows described in ``ARCHITECTURE.md`` and ensure that
+core user journeys remain stable over time:
+
+- Creating the first admin user and subsequent normal users.
+- Building Matter hierarchies and validating ``get_full_path`` recursion.
+- Privacy checks (one user cannot see or use another user's matters).
+- Timer start/stop behaviour and duration calculation.
 """
 from datetime import date
 
