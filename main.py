@@ -1642,21 +1642,47 @@ class SentinelApp:
             path_list = self.db.get_matters_with_full_paths()
             path_by_id = {mid: path for mid, path in path_list}
             cur = self.db.current_user_id
-            by_client: dict[str, list[tuple[int, str, str, bool]]] = defaultdict(list)
+            by_client: dict[str, list[tuple[int, str, str, bool, float | None]]] = defaultdict(list)
             for m in matters:
                 path = path_by_id.get(m.id, m.name)
                 client = path.split(" > ")[0] if " > " in path else path
                 is_owner = cur is not None and m.owner_id == cur
-                by_client[client].append((m.id, path, m.matter_code, is_owner))
+                rate = getattr(m, "hourly_rate_euro", None)
+                by_client[client].append((m.id, path, m.matter_code, is_owner, rate))
             for client in by_client:
                 by_client[client].sort(key=lambda x: x[1])
             return by_client
+
+        def _client_sort_key(c: str, by_client: dict, sort_value: str) -> float:
+            if sort_value == "most_used_budget":
+                all_mids = [mid for items in by_client.values() for mid, *_ in items]
+                budget_status_by_id = self.db.get_matter_budget_status_batch(all_mids)
+                items = by_client[c]
+                return max(
+                    (budget_status_by_id.get(mid, {}) or {}).get("ratio") or 0
+                    for mid, *_ in items
+                )
+            rows_data = self.db.get_time_by_client_and_matter_detailed()
+            client_sort_key_map: dict[str, float] = defaultdict(float)
+            for row in rows_data:
+                client_name, _, total_sec, not_inv_sec, *_ = row
+                if sort_value == "most_uninvoiced":
+                    client_sort_key_map[client_name] += not_inv_sec
+                else:
+                    client_sort_key_map[client_name] += total_sec
+            return client_sort_key_map.get(c, 0.0)
     
         def _build_list_controls(by_client: dict):
-            all_mids = [mid for items in by_client.values() for mid, _, _, _ in items]
+            sort_value = (page.data or {}).get("matters_sort") or "most_uninvoiced"
+            client_order = sorted(
+                by_client.keys(),
+                key=lambda c: _client_sort_key(c, by_client, sort_value),
+                reverse=True,
+            )
+            all_mids = [mid for items in by_client.values() for mid, *_ in items]
             budget_status_by_id = self.db.get_matter_budget_status_batch(all_mids)
             controls = []
-            for client_name in sorted(by_client.keys()):
+            for client_name in client_order:
                 items = by_client[client_name]
                 is_expanded = client_name in expanded_clients_matters
                 controls.append(
@@ -1670,7 +1696,7 @@ class SentinelApp:
                     ),
                 )
                 menu_items_builder = []
-                for mid, path, code, is_owner in items:
+                for mid, path, code, is_owner, rate in items:
                     display_path = path if is_owner else f"{path} (shared)"
                     budget_status = budget_status_by_id.get(mid, {})
                     leading_icon = None
@@ -1696,6 +1722,20 @@ class SentinelApp:
                                 size=18,
                                 tooltip=tooltip,
                             )
+                    rate_str = format_eur(rate) if rate is not None else "—"
+                    budget_str = ""
+                    if budget_status.get("budget_eur") is not None and budget_status["budget_eur"] > 0:
+                        pct = int((budget_status.get("ratio") or 0) * 100)
+                        if budget_status.get("over_budget"):
+                            budget_str = ft.Text(f"{pct}%", size=12, color=ft.Colors.RED)
+                        elif budget_status.get("near_budget"):
+                            budget_str = ft.Text(f"{pct}%", size=12, color=ft.Colors.ORANGE)
+                        else:
+                            budget_str = ft.Text(f"{pct}%", size=12, color=ft.Colors.GREY_400)
+                    subtitle_parts = [ft.Text(f"{code} · {rate_str}", size=12)]
+                    if budget_str:
+                        subtitle_parts.append(ft.Text(" · ", size=12))
+                        subtitle_parts.append(budget_str)
                     items_list = [
                         ft.PopupMenuItem(
                             content="Edit rate…",
@@ -1736,7 +1776,7 @@ class SentinelApp:
                         ft.ListTile(
                             leading=leading_icon,
                             title=ft.Text(display_path, size=14),
-                            subtitle=ft.Text(code, size=12),
+                            subtitle=ft.Row(subtitle_parts, wrap=True),
                             trailing=ft.PopupMenuButton(
                                 icon=ft.Icons.MORE_VERT,
                                 items=items_list,
@@ -2617,7 +2657,7 @@ class SentinelApp:
             all_entries = [
                 (c, path, code)
                 for c, items in by_client.items()
-                for (_, path, code, _) in items
+                for (_, path, code, _, _) in items
             ]
             all_entries.extend((c, c, "") for c in by_client.keys())  # clients as entries too
             q = (e.control.value or "").strip().lower()
@@ -2646,7 +2686,7 @@ class SentinelApp:
                     ft.TextField(
                         ref=parent_search_ref,
                         label="Search by name or path",
-                        width=400,
+                        expand=True,
                         on_change=on_parent_search,
                     ),
                     ft.Container(
@@ -2655,7 +2695,7 @@ class SentinelApp:
                             controls=_build_parent_list_controls(""),
                             scroll=ft.ScrollMode.AUTO,
                         ),
-                        height=220,
+                        height=180,
                         border=ft.border.all(1, ft.Colors.OUTLINE),
                         border_radius=4,
                     ),
@@ -2676,15 +2716,32 @@ class SentinelApp:
             on_change=on_type_change,
         )
     
+        def on_matters_sort_change(e):
+            val = getattr(e.control, "value", None) or getattr(e, "data", None)
+            if page.data is not None and val:
+                page.data["matters_sort"] = val
+                refresh_list()
+
         search_field = ft.TextField(
             label="Search clients and matters",
-            width=400,
+            expand=True,
             on_change=on_search,
         )
         search_results_column = ft.Column(
             ref=search_results_ref,
             visible=False,
             scroll=ft.ScrollMode.AUTO,
+        )
+        matters_sort_dropdown = ft.Dropdown(
+            label="Sort clients by",
+            width=200,
+            value=(page.data or {}).get("matters_sort") or "most_uninvoiced",
+            options=[
+                ft.DropdownOption(key="most_uninvoiced", text="Most not invoiced time"),
+                ft.DropdownOption(key="most_accrued", text="Most accrued (total) time"),
+                ft.DropdownOption(key="most_used_budget", text="Most used up budget"),
+            ],
+            on_select=on_matters_sort_change,
         )
     
         by_client_initial = _by_client()
@@ -2880,32 +2937,73 @@ class SentinelApp:
         page.overlay.append(edit_entry_dialog)
         page.overlay.append(add_entry_dialog)
     
+        add_form_card = ft.Card(
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text("Add", size=14, weight=ft.FontWeight.W_500),
+                        ft.Container(height=4),
+                        ft.Row(
+                            [add_type_button, ft.ElevatedButton("Add", icon=ft.Icons.ADD, on_click=on_add)],
+                            spacing=8,
+                            alignment=ft.MainAxisAlignment.START,
+                        ),
+                        ft.Container(height=8),
+                        parent_section,
+                        ft.Row(
+                            [
+                                ft.TextField(ref=name_field, label="Name", expand=True),
+                                ft.TextField(
+                                    ref=add_rate_field,
+                                    label="Client hourly rate (€)",
+                                    expand=True,
+                                    hint_text="Optional",
+                                ),
+                            ],
+                            spacing=8,
+                        ),
+                    ],
+                    spacing=0,
+                    tight=True,
+                ),
+                padding=12,
+            ),
+        )
+        list_card = ft.Card(
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text("Clients & Matters", size=14, weight=ft.FontWeight.W_500),
+                        ft.Container(height=4),
+                        ft.Row(
+                            [search_field, matters_sort_dropdown],
+                            spacing=8,
+                            alignment=ft.MainAxisAlignment.START,
+                        ),
+                        ft.Container(height=4),
+                        search_results_column,
+                        ft.Container(height=4),
+                        ft.Container(content=list_column, expand=True),
+                    ],
+                    spacing=0,
+                    expand=True,
+                ),
+                padding=12,
+            ),
+        )
         return ft.Column(
             [
-                ft.Text("Manage Matters", size=24, weight=ft.FontWeight.BOLD),
-                ft.Container(height=16),
-                ft.Text("Add as", size=14),
-                ft.Container(height=4),
-                add_type_button,
-                ft.Container(height=16),
-                parent_section,
-                ft.TextField(ref=name_field, label="Name", width=400),
-                ft.TextField(
-                    ref=add_rate_field,
-                    label="Client hourly rate (€)",
-                    width=400,
-                    hint_text="Optional; leave empty to use user default or set later",
+                ft.Text("Manage Matters", size=20, weight=ft.FontWeight.BOLD),
+                ft.Container(height=8),
+                ft.Row(
+                    [
+                        ft.Container(content=add_form_card, expand=True),
+                        ft.Container(width=16),
+                        ft.Container(content=list_card, expand=True),
+                    ],
+                    expand=True,
+                    spacing=0,
                 ),
-                ft.Container(height=8),
-                ft.ElevatedButton("Add", icon=ft.Icons.ADD, on_click=on_add),
-                ft.Container(height=24),
-                ft.Text("Clients & Matters", size=16, weight=ft.FontWeight.W_500),
-                ft.Container(height=8),
-                search_field,
-                ft.Container(height=8),
-                search_results_column,
-                ft.Container(height=8),
-                list_column,
             ],
             expand=True,
             horizontal_alignment=ft.CrossAxisAlignment.START,
