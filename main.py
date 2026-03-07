@@ -28,6 +28,14 @@ TIME_FMT = "%H:%M"
 
 
 # Rate source colors for chargeable amounts: user_matter=teal, matter=green, upper_matter=orange, user=red
+RATE_LEGEND_TOOLTIP = (
+    "Teal = your rate for this matter; "
+    "Green = matter rate; "
+    "Orange = parent/client rate; "
+    "Red = your default rate."
+)
+
+
 def _rate_source_color(source: str) -> str:
     if source == "user_matter":
         return "teal"
@@ -239,6 +247,10 @@ class SentinelApp:
             page.update()
             page.run_task(_async_timer_refresh)
 
+        if page.data is None:
+            page.data = {}
+        page.data["show_timer_callback"] = show_timer
+
         def show_matters(_):
             self.body_ref.current.content = matters_container
             page.update()
@@ -321,14 +333,6 @@ class SentinelApp:
                     label="Users",
                 ),
             )
-        if logout_callback:
-            destinations.append(
-                ft.NavigationRailDestination(
-                    icon=ft.Icons.LOGOUT,
-                    selected_icon=ft.Icons.LOGOUT,
-                    label="Log out",
-                ),
-            )
         if page.data is None:
             page.data = {}
         page.data["logout_callback"] = logout_callback
@@ -347,28 +351,26 @@ class SentinelApp:
             if logout_callback:
                 logout_callback()
 
-        def _on_rail_change_with_logout(e):
-            if logout_callback and e.control.selected_index == len(destinations) - 1:
-                e.control.selected_index = 0
-                e.control.update()
-                page.run_task(_do_logout, e)
-                return
-            on_rail_change(e)
-
-        rail.on_change = _on_rail_change_with_logout
+        rail.on_change = on_rail_change
 
         body = ft.Container(ref=self.body_ref, content=timer_container, expand=True)
 
+        top_bar_controls: list[ft.Control] = [
+            ft.Text(
+                f"Logged in as {current_username}",
+                size=14,
+                color=ft.Colors.ON_SURFACE_VARIANT,
+            ),
+        ]
+        if logout_callback:
+            top_bar_controls.append(
+                ft.TextButton("Log out", on_click=lambda e: page.run_task(_do_logout, e)),
+            )
         top_bar = ft.Row(
-            [
-                ft.Text(
-                    f"Logged in as {current_username}",
-                    size=14,
-                    color=ft.Colors.ON_SURFACE_VARIANT,
-                ),
-            ],
+            top_bar_controls,
             alignment=ft.MainAxisAlignment.END,
             tight=True,
+            spacing=16,
         )
 
         page.add(
@@ -597,6 +599,13 @@ class SentinelApp:
             nonlocal options, options_all
             options = self.db.get_matters_with_full_paths(for_timer=True)
             options_all = self.db.get_matters_with_full_paths(for_timer=False)
+            # Apply "Log time" from Manage Matters: select this matter and switch to Timer
+            select_mid = (page.data or {}).pop("timer_select_matter_id", None)
+            if select_mid is not None:
+                for mid, path in options:
+                    if mid == select_mid:
+                        timer_matter_selected[0], timer_matter_selected[1] = mid, path
+                        break
             # Keep all clients expanded so all matters from all clients are visible
             by_client = _by_client_include_all_clients()
             timer_matter_expanded.clear()
@@ -605,6 +614,8 @@ class SentinelApp:
                 timer_matter_selected[0], timer_matter_selected[1] = options[0][0], options[0][1]
                 if timer_matter_selection_ref.current:
                     timer_matter_selection_ref.current.value = f"Selected: {options[0][1]}"
+            if timer_matter_selection_ref.current:
+                timer_matter_selection_ref.current.value = f"Selected: {timer_matter_selected[1]}" if timer_matter_selected[1] else "Select a matter below."
             if timer_matter_list_ref.current:
                 q = timer_matter_search_ref.current.value if timer_matter_search_ref.current else ""
                 timer_matter_list_ref.current.controls = _build_timer_matter_list(q)
@@ -828,7 +839,10 @@ class SentinelApp:
                     ft.Text("Start", size=12, weight=ft.FontWeight.W_500, width=90),
                     ft.Text("End", size=12, weight=ft.FontWeight.W_500, width=90),
                     ft.Text("Duration", size=12, weight=ft.FontWeight.W_500, width=100),
-                    ft.Text("Amount (€)", size=12, weight=ft.FontWeight.W_500, width=90),
+                    ft.Tooltip(
+                        message=RATE_LEGEND_TOOLTIP,
+                        content=ft.Text("Amount (€)", size=12, weight=ft.FontWeight.W_500, width=90),
+                    ),
                     ft.Container(width=90),
                     ft.Text("Actions", size=12, weight=ft.FontWeight.W_500, width=64),
                 ],
@@ -842,6 +856,9 @@ class SentinelApp:
             if activities_list_ref.current:
                 activities_list_ref.current.controls = _build_activities_rows()
                 activities_list_ref.current.update()
+            if activities_header_text_ref.current:
+                activities_header_text_ref.current.value = _activities_collapsible_header_text()
+                activities_header_text_ref.current.update()
             _update_near_budget_banner()
 
         def _set_selected_day(new_day: date) -> None:
@@ -1068,7 +1085,32 @@ class SentinelApp:
             alignment=ft.MainAxisAlignment.START,
         )
 
-        activities_section = ft.Container(
+        activities_expanded: list[bool] = [True]
+        activities_header_text_ref = ft.Ref[ft.Text]()
+        activities_content_ref = ft.Ref[ft.Container]()
+        activities_expand_icon_ref = ft.Ref[ft.Icon]()
+
+        def _activities_entry_count() -> int:
+            return len(self.db.get_time_entries_for_day(selected_day[0]))
+
+        def _activities_collapsible_header_text() -> str:
+            n = _activities_entry_count()
+            return f"{_label_for_selected_day()} ({n} entries)"
+
+        def _on_toggle_activities_collapsed(_):
+            activities_expanded[0] = not activities_expanded[0]
+            if activities_content_ref.current:
+                activities_content_ref.current.visible = activities_expanded[0]
+                activities_content_ref.current.update()
+            if activities_expand_icon_ref.current:
+                activities_expand_icon_ref.current.icon = (
+                    ft.Icons.EXPAND_LESS if activities_expanded[0] else ft.Icons.EXPAND_MORE
+                )
+                activities_expand_icon_ref.current.update()
+            page.update()
+
+        activities_content_container = ft.Container(
+            ref=activities_content_ref,
             content=ft.Column(
                 [
                     activities_title,
@@ -1076,6 +1118,36 @@ class SentinelApp:
                     day_selector_row,
                     ft.Container(height=6),
                     activities_list_container,
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.START,
+            ),
+            visible=True,
+        )
+        activities_section = ft.Container(
+            content=ft.Column(
+                [
+                    ft.GestureDetector(
+                        content=ft.Row(
+                            [
+                                ft.Icon(
+                                    ref=activities_expand_icon_ref,
+                                    icon=ft.Icons.EXPAND_LESS,
+                                    size=20,
+                                ),
+                                ft.Text(
+                                    ref=activities_header_text_ref,
+                                    value=_activities_collapsible_header_text(),
+                                    size=16,
+                                    weight=ft.FontWeight.W_500,
+                                ),
+                            ],
+                            spacing=8,
+                            alignment=ft.MainAxisAlignment.START,
+                        ),
+                        on_tap=_on_toggle_activities_collapsed,
+                    ),
+                    ft.Container(height=4),
+                    activities_content_container,
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.START,
             ),
@@ -1088,8 +1160,9 @@ class SentinelApp:
         manual_end_ref = ft.Ref[ft.TextField]()
         manual_duration_ref = ft.Ref[ft.TextField]()
         manual_derived_ref = ft.Ref[ft.Text]()
+        manual_entry_dialog_ref = ft.Ref[ft.AlertDialog]()
+        manual_dialog_matter_ref = ft.Ref[ft.Text]()
         timer_section_ref = ft.Ref[ft.Container]()
-        manual_section_ref = ft.Ref[ft.Container]()
         start_time_field_ref = ft.Ref[ft.TextField]()
         start_time_section_ref = ft.Ref[ft.Container]()
         if page.data is None:
@@ -1105,8 +1178,6 @@ class SentinelApp:
         )
         start_btn = ft.ElevatedButton("Start", icon=ft.Icons.PLAY_ARROW)
         stop_btn = ft.OutlinedButton("Stop", icon=ft.Icons.STOP)
-        manual_mode: list[bool] = [False]
-        manual_btn_ref = ft.Ref[ft.ElevatedButton]()
 
         async def timer_loop():
             while running_ref[0] and start_time_ref[0]:
@@ -1267,8 +1338,15 @@ class SentinelApp:
             refresh = page.data.get("refresh_timer_activities")
             if callable(refresh):
                 refresh()
+            if manual_entry_dialog_ref.current:
+                manual_entry_dialog_ref.current.open = False
+                manual_entry_dialog_ref.current.update()
             if not _show_budget_snack_if_needed(matter_id):
-                page.snack_bar = ft.SnackBar(ft.Text("Manual entry added to selected matter."), open=True)
+                matter_path = timer_matter_selected[1] or ""
+                page.snack_bar = ft.SnackBar(
+                    ft.Text(f"Manual entry added to {matter_path}." if matter_path else "Manual entry added."),
+                    open=True,
+                )
             page.update()
 
         start_btn.on_click = on_start
@@ -1284,37 +1362,71 @@ class SentinelApp:
                 pass  # Control not on page yet (e.g. during initial build)
 
         def _set_mode(manual: bool):
-            manual_mode[0] = manual
+            """Keep timer section visible when not in manual mode (Continue task calls with False). Manual entry is now a dialog."""
             if timer_section_ref.current:
                 timer_section_ref.current.visible = not manual
                 _safe_update(timer_section_ref.current)
-            if manual_section_ref.current:
-                manual_section_ref.current.visible = manual
-                _safe_update(manual_section_ref.current)
-            if manual_btn_ref.current:
-                manual_btn_ref.current.icon = (
-                    ft.Icons.CHECK if manual_mode[0] else ft.Icons.EDIT_NOTE
-                )
-                # Use a neutral gray background when selected; avoid enum values
-                manual_btn_ref.current.style = (
-                    ft.ButtonStyle(
-                        bgcolor={ft.ControlState.DEFAULT: "#444444"}
-                    )
-                    if manual_mode[0]
-                    else None
-                )
-                _safe_update(manual_btn_ref.current)
 
         # Expose mode setter so other callbacks (e.g. Continue task) can force timer mode.
         (page.data or {})["_timer_set_mode_callback"] = _set_mode
 
-        def _on_manual_toggle(_):
-            _set_mode(not manual_mode[0])
+        def _open_manual_entry_dialog(_):
+            if _get_selected_matter_id() is None:
+                page.snack_bar = ft.SnackBar(ft.Text("Select a matter from the list."), open=True)
+                page.update()
+                return
+            if manual_dialog_matter_ref.current:
+                manual_dialog_matter_ref.current.value = timer_matter_selected[1] or ""
+                manual_dialog_matter_ref.current.update()
+            if manual_desc_ref.current:
+                manual_desc_ref.current.value = ""
+            if manual_start_ref.current:
+                manual_start_ref.current.value = ""
+            if manual_end_ref.current:
+                manual_end_ref.current.value = ""
+            if manual_duration_ref.current:
+                manual_duration_ref.current.value = ""
+            _update_manual_derived()
+            if manual_entry_dialog_ref.current:
+                manual_entry_dialog_ref.current.open = True
+                manual_entry_dialog_ref.current.update()
+            page.update()
+
+        def _close_manual_entry_dialog():
+            if manual_entry_dialog_ref.current:
+                manual_entry_dialog_ref.current.open = False
+                manual_entry_dialog_ref.current.update()
+            page.update()
 
         timer_matter_list_initial = _build_timer_matter_list("")
+        matter_chip_row = ft.Row(
+            [
+                ft.Container(
+                    content=ft.Row(
+                        [
+                            ft.Icon(ft.Icons.FOLDER_OPEN, size=18, color=ft.Colors.ON_SURFACE_VARIANT),
+                            ft.Text(
+                                ref=timer_matter_selection_ref,
+                                size=14,
+                                value=f"Selected: {timer_matter_selected[1]}" if timer_matter_selected[1] else "Select a matter below.",
+                            ),
+                        ],
+                        spacing=8,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                    ),
+                    border=ft.border.all(1, ft.Colors.OUTLINE),
+                    border_radius=20,
+                    padding=ft.Padding(12, 6, 12, 6),
+                    tooltip="Matter for timer and manual entries",
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.CENTER,
+        )
         matter_block = ft.Container(
             content=ft.Column(
                 [
+                    matter_chip_row,
+                    ft.Container(height=8),
                     ft.TextField(
                         ref=timer_matter_search_ref,
                         label="Search matters by name or path",
@@ -1324,16 +1436,11 @@ class SentinelApp:
                     ft.Container(height=4),
                     ft.Container(
                         content=ft.Column(ref=timer_matter_list_ref, controls=timer_matter_list_initial, scroll=ft.ScrollMode.AUTO),
-                        height=160,
+                        height=120,
                         border=ft.border.all(1, ft.Colors.OUTLINE),
                         border_radius=4,
                     ),
                     ft.Container(height=4),
-                    ft.Text(
-                        ref=timer_matter_selection_ref,
-                        size=12,
-                        value=f"Selected: {timer_matter_selected[1]}" if timer_matter_selected[1] else "Select a matter below.",
-                    ),
                     ft.Text("All time (timer and manual) is logged to the matter selected above.", size=12),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -1381,30 +1488,38 @@ class SentinelApp:
             visible=True,
         )
 
-        manual_section = ft.Container(
-            ref=manual_section_ref,
+        manual_entry_dialog = ft.AlertDialog(
+            ref=manual_entry_dialog_ref,
+            title=ft.Text("Add manual entry"),
             content=ft.Column(
                 [
-                    ft.Text("Fill exactly two of Start, End, Duration; the third is derived below.", size=12),
+                    ft.Text("Matter", size=12, weight=ft.FontWeight.W_500),
+                    ft.Text(ref=manual_dialog_matter_ref, value="", size=14),
                     ft.Container(height=8),
+                    ft.Text("Fill exactly two of Start, End, Duration; the third is derived.", size=12),
                     ft.TextField(ref=manual_desc_ref, label="Description (optional)", width=400),
                     ft.TextField(ref=manual_start_ref, label="Start (YYYY-MM-DD HH:MM)", width=400, on_change=_update_manual_derived),
                     ft.TextField(ref=manual_end_ref, label="End (YYYY-MM-DD HH:MM)", width=400, on_change=_update_manual_derived),
                     ft.TextField(ref=manual_duration_ref, label="Duration (hours, e.g. 1.5 or 1:30)", width=400, on_change=_update_manual_derived),
                     ft.Text(ref=manual_derived_ref, size=12, value="Fill exactly two of Start, End, Duration; the third will be shown here."),
-                    ft.Container(height=8),
-                    ft.ElevatedButton("Add manual entry", icon=ft.Icons.ADD, on_click=on_manual_add),
+                    ft.Row(
+                        [
+                            ft.ElevatedButton("Add", icon=ft.Icons.ADD, on_click=on_manual_add),
+                            ft.OutlinedButton("Cancel", on_click=lambda e: _close_manual_entry_dialog()),
+                        ],
+                        spacing=12,
+                    ),
                 ],
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                tight=True,
+                scroll=ft.ScrollMode.AUTO,
             ),
-            visible=False,
         )
+        page.overlay.append(manual_entry_dialog)
 
         manual_btn = ft.ElevatedButton(
             "Manual entry",
             icon=ft.Icons.EDIT_NOTE,
-            ref=manual_btn_ref,
-            on_click=_on_manual_toggle,
+            on_click=_open_manual_entry_dialog,
         )
 
         near_budget_banner = ft.Container(
@@ -1421,14 +1536,6 @@ class SentinelApp:
             ft.Container(height=8),
             near_budget_banner,
             ft.Container(height=8),
-            activities_section,
-        ]
-        if not options:
-            timer_controls.append(
-                ft.Text("Add at least one matter under a client to log time.", size=14)
-            )
-            timer_controls.append(ft.Container(height=8))
-        timer_controls.extend([
             matter_block,
             ft.Container(height=8),
             ft.Row(
@@ -1438,8 +1545,22 @@ class SentinelApp:
             ),
             ft.Container(height=8),
             timer_section,
-            manual_section,
-        ])
+            ft.Container(height=16),
+            activities_section,
+        ]
+        if not options:
+            timer_controls.insert(
+                4,
+                ft.Container(
+                    content=ft.Column(
+                        [
+                            ft.Text("Add at least one matter under a client to log time.", size=14),
+                            ft.Container(height=8),
+                        ],
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                ),
+            )
 
         # Ensure initial mode is timer (manual off).
         _set_mode(False)
@@ -1461,10 +1582,15 @@ class SentinelApp:
         list_ref = self.matters_list_ref
         name_field = ft.Ref[ft.TextField]()
         add_rate_field = ft.Ref[ft.TextField]()
-        parent_dropdown = ft.Ref[ft.Dropdown]()
         add_type_ref = ft.Ref[ft.SegmentedButton]()
         parent_section_ref = ft.Ref[ft.Container]()
         search_results_ref = ft.Ref[ft.Column]()
+        parent_options_data: list[tuple[int | None, str]] = []
+        parent_selected_ref: list = [None]  # (pid, path) or None
+        parent_search_ref = ft.Ref[ft.TextField]()
+        parent_list_ref = ft.Ref[ft.Column]()
+        parent_selection_text_ref = ft.Ref[ft.Text]()
+        parent_expanded: set[str] = set()
     
         move_source: list = [None, None]
         merge_source: list = [None, None]
@@ -1585,6 +1711,16 @@ class SentinelApp:
                             on_click=lambda e, m=mid, p=path: open_time_entries_dialog(m, p),
                         ),
                     ]
+                    # Log time only for non-root matters (time cannot be logged on clients)
+                    if " > " in path:
+                        items_list.insert(
+                            0,
+                            ft.PopupMenuItem(
+                                content="Log time",
+                                icon=ft.Icons.TIMER,
+                                on_click=lambda e, m=mid: _on_log_time(m),
+                            ),
+                        )
                     if is_owner:
                         items_list.insert(
                             0,
@@ -1616,6 +1752,16 @@ class SentinelApp:
         def _on_toggle_client(client_name: str):
             expanded_clients_matters.symmetric_difference_update([client_name])
             refresh_list()
+
+        def _on_log_time(matter_id: int):
+            """Switch to Timer tab and select this matter for logging time."""
+            if page.data is None:
+                page.data = {}
+            page.data["timer_select_matter_id"] = matter_id
+            cb = page.data.get("show_timer_callback")
+            if callable(cb):
+                cb(None)
+            page.update()
     
         def _options_by_client(options: list, include_root: bool) -> dict:
             """Group (id, path) options by client (first path segment). Root option in key '— Root (new client) —'."""
@@ -1797,7 +1943,7 @@ class SentinelApp:
             if move_dialog_ref.current:
                 move_dialog_ref.current.open = False
             refresh_list()
-            refresh_parent_dropdown()
+            refresh_parent_list()
             if on_matters_changed:
                 on_matters_changed()
             page.snack_bar = ft.SnackBar(ft.Text("Matter moved."), open=True)
@@ -1839,7 +1985,7 @@ class SentinelApp:
             if merge_dialog_ref.current:
                 merge_dialog_ref.current.open = False
             refresh_list()
-            refresh_parent_dropdown()
+            refresh_parent_list()
             if on_matters_changed:
                 on_matters_changed()
             page.snack_bar = ft.SnackBar(ft.Text("Matters merged."), open=True)
@@ -2331,19 +2477,14 @@ class SentinelApp:
                 is_client = add_type_ref.current.selected[0] == "client"
             pid = None
             if not is_client:
-                if not parent_dropdown.current or not parent_dropdown.current.value:
+                if not parent_selected_ref[0]:
                     page.snack_bar = ft.SnackBar(
                         ft.Text("Select a parent client or matter when adding a matter."),
                         open=True,
                     )
                     page.update()
                     return
-                try:
-                    pid = int(parent_dropdown.current.value)
-                except (TypeError, ValueError):
-                    page.snack_bar = ft.SnackBar(ft.Text("Invalid parent selection."), open=True)
-                    page.update()
-                    return
+                pid = parent_selected_ref[0][0]
             rate_val = None
             if add_rate_field.current and (add_rate_field.current.value or "").strip():
                 try:
@@ -2366,30 +2507,102 @@ class SentinelApp:
                 page.update()
                 return
             name_field.current.value = ""
-            if parent_dropdown.current:
-                parent_dropdown.current.value = None
+            parent_selected_ref[0] = None
+            if parent_selection_text_ref.current:
+                parent_selection_text_ref.current.value = "Selected: —"
+                parent_selection_text_ref.current.update()
             if add_rate_field.current:
                 add_rate_field.current.value = ""
             refresh_list()
-            refresh_parent_dropdown()
+            refresh_parent_list()
             if on_matters_changed:
                 on_matters_changed()
             page.update()
-    
-        def refresh_parent_dropdown():
-            """Reload parent dropdown options from DB so new clients/matters appear immediately."""
-            if parent_dropdown.current:
-                path_options = self.db.get_matters_with_full_paths()
-                parent_dropdown.current.options = [
-                    ft.DropdownOption(key=str(mid), text=path) for mid, path in path_options
+
+        def _build_parent_list_controls(query: str):
+            by_client = _options_by_client(parent_options_data, include_root=False)
+            q = (query or "").strip().lower()
+            if q:
+                flat = [(pid, ptext) for pid, ptext in parent_options_data if ptext and q in ptext.lower()][:20]
+                return [
+                    ft.ListTile(
+                        title=ft.Text(ptext, size=14),
+                        selected=parent_selected_ref[0] == (pid, ptext),
+                        on_click=lambda e, pid=pid, ptext=ptext: _on_parent_select(pid, ptext),
+                    )
+                    for pid, ptext in flat
                 ]
+            controls = []
+            for client_name in sorted(by_client.keys()):
+                items = by_client[client_name]
+                is_exp = client_name in parent_expanded
+                controls.append(
+                    ft.ListTile(
+                        title=ft.Text(client_name, weight=ft.FontWeight.W_500, size=14),
+                        subtitle=ft.Text(f"{len(items)} item(s)", size=12),
+                        trailing=ft.Icon(ft.Icons.EXPAND_LESS if is_exp else ft.Icons.EXPAND_MORE, size=20),
+                        on_click=lambda e, c=client_name: _on_toggle_parent_expanded(c),
+                    ),
+                )
+                controls.append(
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.ListTile(
+                                    title=ft.Text(ptext, size=14),
+                                    selected=parent_selected_ref[0] == (pid, ptext),
+                                    on_click=lambda e, pid=pid, ptext=ptext: _on_parent_select(pid, ptext),
+                                )
+                                for pid, ptext in items
+                            ],
+                        ),
+                        visible=is_exp,
+                        padding=ft.Padding.only(left=20),
+                    ),
+                )
+            return controls
+
+        def _on_toggle_parent_expanded(client_name: str):
+            parent_expanded.symmetric_difference_update([client_name])
+            if parent_list_ref.current:
+                parent_list_ref.current.controls = _build_parent_list_controls(
+                    parent_search_ref.current.value if parent_search_ref.current else ""
+                )
+                parent_list_ref.current.update()
+
+        def _on_parent_select(pid: int, ptext: str):
+            parent_selected_ref[0] = (pid, ptext)
+            if parent_selection_text_ref.current:
+                parent_selection_text_ref.current.value = f"Selected: {ptext}"
+                parent_selection_text_ref.current.update()
+            if parent_list_ref.current:
+                parent_list_ref.current.controls = _build_parent_list_controls(
+                    parent_search_ref.current.value if parent_search_ref.current else ""
+                )
+                parent_list_ref.current.update()
+
+        def on_parent_search(e):
+            if parent_list_ref.current and parent_search_ref.current:
+                parent_list_ref.current.controls = _build_parent_list_controls(e.control.value or "")
+                parent_list_ref.current.update()
+
+        def refresh_parent_list():
+            """Reload parent list options from DB so new clients/matters appear immediately."""
+            path_options = self.db.get_matters_with_full_paths()
+            parent_options_data.clear()
+            parent_options_data.extend(path_options)
+            if parent_list_ref.current:
+                parent_list_ref.current.controls = _build_parent_list_controls(
+                    parent_search_ref.current.value if parent_search_ref.current else ""
+                )
+                parent_list_ref.current.update()
 
         def on_type_change(e):
             if parent_section_ref.current and add_type_ref.current:
                 is_matter = add_type_ref.current.selected and add_type_ref.current.selected[0] == "matter"
                 parent_section_ref.current.visible = is_matter
                 if is_matter:
-                    refresh_parent_dropdown()
+                    refresh_parent_list()
                 if add_rate_field.current:
                     add_rate_field.current.label = "Matter hourly rate (€)" if is_matter else "Client hourly rate (€)"
                 page.update()
@@ -2420,17 +2633,34 @@ class SentinelApp:
                 search_results_ref.current.visible = bool(matching)
             page.update()
 
-        path_options = self.db.get_matters_with_full_paths()
-        parent_dropdown_control = ft.Dropdown(
-            ref=parent_dropdown,
-            label="Parent client or matter",
-            width=400,
-            options=[ft.DropdownOption(key=str(mid), text=path) for mid, path in path_options],
-            value=None,
-        )
+        parent_options_data_initial = self.db.get_matters_with_full_paths()
+        parent_options_data[:] = parent_options_data_initial
         parent_section = ft.Container(
             ref=parent_section_ref,
-            content=parent_dropdown_control,
+            content=ft.Column(
+                [
+                    ft.Text("Parent (client or matter)", size=14, weight=ft.FontWeight.W_500),
+                    ft.TextField(
+                        ref=parent_search_ref,
+                        label="Search by name or path",
+                        width=400,
+                        on_change=on_parent_search,
+                    ),
+                    ft.Container(
+                        content=ft.Column(
+                            ref=parent_list_ref,
+                            controls=_build_parent_list_controls(""),
+                            scroll=ft.ScrollMode.AUTO,
+                        ),
+                        height=220,
+                        border=ft.border.all(1, ft.Colors.OUTLINE),
+                        border_radius=4,
+                    ),
+                    ft.Text(ref=parent_selection_text_ref, size=12, value="Selected: —"),
+                ],
+                tight=True,
+                spacing=8,
+            ),
             visible=False,
         )
         add_type_button = ft.SegmentedButton(
@@ -2741,6 +2971,9 @@ class SentinelApp:
             ),
             reverse=True,
         )
+        # Expand first client by default so users see matters immediately
+        if not expanded_clients and client_order:
+            expanded_clients.add(client_order[0])
 
         def _reporting_matter_row(matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_inv_amount_eur, rate_source, matter_id_by_path, budget_status_by_id):
             mid = matter_id_by_path.get(matter_path)
@@ -2855,6 +3088,7 @@ class SentinelApp:
                 search_results_column,
                 ft.Container(height=16),
                 ft.Text("By client", size=16, weight=ft.FontWeight.W_500),
+                ft.Text(RATE_LEGEND_TOOLTIP, size=11, color=ft.Colors.ON_SURFACE_VARIANT),
                 ft.Container(height=8),
                 ft.Container(
                     content=ft.Column(client_blocks, scroll=ft.ScrollMode.AUTO),
@@ -2912,7 +3146,10 @@ class SentinelApp:
                             ft.Text("Matter", size=12, weight=ft.FontWeight.W_500, width=280),
                             ft.Text("Description", size=12, weight=ft.FontWeight.W_500, width=180),
                             ft.Text("Duration", size=12, weight=ft.FontWeight.W_500, width=80),
-                            ft.Text("Amount (€)", size=12, weight=ft.FontWeight.W_500, width=90),
+                            ft.Tooltip(
+                                message=RATE_LEGEND_TOOLTIP,
+                                content=ft.Text("Amount (€)", size=12, weight=ft.FontWeight.W_500, width=90),
+                            ),
                         ],
                         spacing=8,
                     ),
@@ -3211,10 +3448,13 @@ class SentinelApp:
                 page.update()
                 return
             out_path = export_dir / default_name
-            _write_and_confirm_export(out_path, payload, entry_ids)
+            if _write_and_confirm_export(out_path, payload, entry_ids):
+                if page.data is None:
+                    page.data = {}
+                page.data["timesheet_export_dir"] = str(export_dir)
             page.update()
 
-        default_dir_str = str(_default_export_dir())
+        default_dir_str = (page.data or {}).get("timesheet_export_dir") or str(_default_export_dir())
         search_field = ft.TextField(
             label="Search matters by name or path",
             width=400,
@@ -3248,7 +3488,34 @@ class SentinelApp:
             [
                 ft.Text("Timesheet", size=24, weight=ft.FontWeight.BOLD),
                 ft.Container(height=16),
+                ft.Text("Matter selection", size=16, weight=ft.FontWeight.W_500),
+                ft.Container(height=8),
+                ft.Row(
+                    [
+                        ft.TextButton(
+                            "Unselect all",
+                            on_click=_on_timesheet_clear_selection,
+                        ),
+                        ft.Dropdown(
+                            label="Sort clients by",
+                            width=280,
+                            value=(page.data or {}).get("reporting_sort") or "most_uninvoiced",
+                            options=[
+                                ft.DropdownOption(key="most_uninvoiced", text="Most not invoiced time"),
+                                ft.DropdownOption(key="most_accrued", text="Most accrued (total) time"),
+                            ],
+                            on_select=_on_timesheet_sort_change,
+                        ),
+                    ],
+                    spacing=24,
+                    alignment=ft.MainAxisAlignment.START,
+                ),
+                ft.Container(height=8),
                 search_field,
+                ft.Container(height=8),
+                ft.Container(content=list_column, expand=True),
+                ft.Container(height=24),
+                ft.Text("Export", size=16, weight=ft.FontWeight.W_500),
                 ft.Container(height=8),
                 export_dir_field,
                 ft.Container(height=8),
@@ -3270,30 +3537,6 @@ class SentinelApp:
                     content=ft.Column(ref=timesheet_preview_ref, scroll=ft.ScrollMode.AUTO),
                     height=180,
                 ),
-                ft.Container(height=16),
-                ft.Row(
-                    [
-                        ft.Text("Matters", size=16, weight=ft.FontWeight.W_500),
-                        ft.TextButton(
-                            "Unselect all",
-                            on_click=_on_timesheet_clear_selection,
-                        ),
-                        ft.Dropdown(
-                            label="Sort clients by",
-                            width=280,
-                            value=(page.data or {}).get("reporting_sort") or "most_uninvoiced",
-                            options=[
-                                ft.DropdownOption(key="most_uninvoiced", text="Most not invoiced time"),
-                                ft.DropdownOption(key="most_accrued", text="Most accrued (total) time"),
-                            ],
-                            on_select=_on_timesheet_sort_change,
-                        ),
-                    ],
-                    spacing=24,
-                    alignment=ft.MainAxisAlignment.START,
-                ),
-                ft.Container(height=8),
-                ft.Container(content=list_column, expand=True),
             ],
             expand=True,
             horizontal_alignment=ft.CrossAxisAlignment.START,
