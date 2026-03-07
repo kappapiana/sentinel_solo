@@ -6,11 +6,11 @@ A desktop time-tracking app with a hierarchy of **clients** and **matters** (pro
 
 ## Features
 
-- **Timer** – **Today’s activities** at the top: list of today’s time entries with editable Matter, Description, Start (hh:mm), End (hh:mm), Duration (H:MM), and **Amount (€)** (duration × applicable hourly rate, color-coded by rate source). Below: searchable matter list (all clients shown, folded by client), optional task description, then **Start/Stop** for live timing or a **Manual** mode that swaps in manual-entry fields.
-- **Manual entry** – Same matter selection; enter two of Start time, End time, or Duration; the third is derived. Add the entry to the selected matter. Manual mode is a distinct view chosen from the Timer tab.
-- **Manage Matters** – Add clients (roots) and matters (under a client or another matter). **Add form** order: parent (for matters), then name, then **Client hourly rate (€)** or **Matter hourly rate (€)** (optional; leave empty to use default or set later). Per matter menu: **Edit rate…**, **Move**, **Merge**, **Time entries** (list with amount € per entry, edit, add manual), and for owners a **Share…** action to share that matter with other users. New clients and matters appear in parent and timer lists immediately.
-- **Reporting** – Time by client and matter with **chargeable amounts (€)**; clients collapsed by default, click to expand; amounts colored by rate source (see **Hourly rates** below).
-- **Timesheet** – Select matters (searchable, folded by client; parent checkbox selects descendants). **Preview** shows entries with duration and Amount (€) by rate source. **Save to folder** and **Export timesheet** to JSON (includes `amount_eur` and `rate_source` per entry); optionally mark exported entries as invoiced.
+- **Timer** – **Start timing first:** at the top, a matter chip shows the current selection; below it a compact searchable matter list (clients folded by default). **Start** / **Stop** and **Manual entry** are right there so you can start or stop the timer without scrolling. **Today’s activities** (list of today’s time entries with editable Matter, Description, Start, End, Duration, **Amount (€)**) sit below in a **collapsible** section. Amounts are color-coded by rate source (see **Hourly rates** below; a tooltip on the column header explains the colors in-app).
+- **Manual entry** – Click **Manual entry** on the Timer tab to open a **dialog**: the current matter is shown (read-only); enter two of Start time, End time, or Duration and the third is derived. Add the entry and close the dialog; the timer and matter selection stay visible (no mode switch).
+- **Manage Matters** – Add clients (roots) and matters (under a client or another matter). **Add form:** choose Client or Matter; for matters, pick the **parent** from a **searchable list** (by client, same pattern as Move). Then name and optional **Client hourly rate (€)** or **Matter hourly rate (€)**. Per matter menu: **Log time** (jump to Timer with this matter selected), **Edit rate…**, **Move**, **Merge**, **Time entries**, and for owners **Share…**. New clients and matters appear in the parent list and Timer immediately.
+- **Reporting** – Time by client and matter with **chargeable amounts (€)**; the **first client** is expanded by default so matters are visible at a glance; click to expand/collapse others. Amounts colored by rate source; a short legend is shown under “By client”.
+- **Timesheet** – **Matter selection** (search, Unselect all, Sort; then checkboxes by client/matter). **Export** section: save-to folder (last used folder is remembered), “Only not invoiced” checkbox, **Preview** and **Export timesheet** to JSON (includes `amount_eur` and `rate_source` per entry); optionally mark exported entries as invoiced.
 
 Matters support unlimited nesting (Client → Project → Subproject…). Time can only be logged on non-root matters (i.e. under a client). A matter is owned by one user but can be **shared** with others; all shared users see each other’s entries on that matter.
 
@@ -23,7 +23,7 @@ Every matter and submatter has an **effective hourly rate** used to compute char
 3. **Client rate** – For a root matter (client), set when adding (Client hourly rate €) or via **Manage Matters** → **Edit rate…**. Used for all matters under that client when they have no own rate.
 4. **User default** – Set in **Users** → Edit (your user) → **Default hourly rate (€)**. Used when no client or matter rate is set for that user.
 
-**Color convention** (wherever chargeable amounts are shown):
+**Color convention** (wherever chargeable amounts are shown; also explained in the UI via tooltips and the Reporting legend):
 
 - **Teal** – Per-user rate for this matter (user–matter override).
 - **Green** – Rate specific to the matter at hand.
@@ -122,7 +122,7 @@ Fixtures in `tests/conftest.py` use a temporary SQLite database and two users (a
 
 ## Project layout
 
-- **main.py** – Flet UI: Timer tab (today’s activities with amount column), Manage Matters tab (add client/matter with optional rate; edit rate per matter), Reporting tab (chargeable €), Timesheet tab (preview + export); dialogs for move/merge, edit matter rate, and time entries.
+- **main.py** – Flet UI: Timer tab (matter chip + Start/Stop first, collapsible today’s activities, manual entry dialog), Manage Matters tab (add client/matter with searchable parent list; Log time, edit rate, move/merge, time entries, share), Reporting tab (first client expanded by default, chargeable €), Timesheet tab (Matter selection + Export sections, remembered folder); Log out in top bar; dialogs for move/merge, edit rate, time entries, manual entry.
 - **database_manager.py** – DB access: matters (incl. `hourly_rate_euro`), time entries, rate resolution, move/merge, get/update/add time entries and matters, get time for day, timesheet export (with amount_eur and rate_source), reporting with amounts.
 - **models.py** – SQLAlchemy models: `User` (incl. `default_hourly_rate_euro`), `Matter` (tree via `parent_id`, `hourly_rate_euro`), `TimeEntry` (linked to matter).
 - **run.sh** – Linux launcher: runs the app with the project venv and optional cursor theme env vars.
@@ -148,12 +148,13 @@ Recommend closing other sessions before restoring and re-logging in after.
 
 ## Usage notes
 
-- **Today’s activities (Timer tab):** Edit Matter, Description, Start, End, or Duration in place. Changes are saved on blur; end/duration/start are linked as above. Duration is shown as H:MM (no seconds).
-- **Matter selection (Timer tab):** Search by name or path; all clients are listed (expand to see matters). All time (timer and manual) is logged to the matter selected there.
-- **Time entries (Manage Matters):** Open “Time entries” from a matter’s menu to see, edit, or add entries; each entry shows its chargeable Amount (€) with the usual rate-source color. When editing or adding, fill two of Start, End, and Duration; the third is computed.
-- **Hourly rates:** Set your **Default hourly rate (€)** in Users → Edit (yourself). When adding a client or matter, you can set **Client hourly rate (€)** or **Matter hourly rate (€)** in the Add form (field order: parent → name → rate). You can also set or change rates later via Manage Matters → **Edit rate…** on each client or matter. Submatters without a rate use the nearest ancestor’s rate; if none, the user default.
-- **Move/Merge:** Use the matter menu (⋮) for “Move…” or “Merge…”. Target selection uses the same searchable, folded list as the Timer.
-- **Timesheet:** Set **Save to folder** to the directory where the file should go (default is your Downloads folder or the app’s `exports/` directory). Check the matters whose time you want to export, then click **Export timesheet** to save `timesheet_YYYYMMDD_HHMMSS.json` there. You can optionally mark those entries as invoiced after export.
+- **Timer tab:** The matter chip and list at the top show the current matter; Start/Stop and Manual entry are immediately below. Today’s activities are in a collapsible section; edit Matter, Description, Start, End, or Duration in place (saved on blur); duration is H:MM. **Manual entry** opens a dialog with the current matter (read-only); fill two of Start, End, Duration—the third is computed.
+- **Matter selection (Timer tab):** Search by name or path; clients are listed (expand to see matters). All time (timer and manual) is logged to the matter selected there.
+- **Manage Matters:** When adding a matter, choose the parent from the searchable list (search and expand by client). Use **Log time** in a matter’s menu (⋮) to switch to the Timer tab with that matter already selected. **Time entries** opens a dialog to see, edit, or add entries (Amount € with rate-source colors; fill two of Start/End/Duration).
+- **Hourly rates:** Set your **Default hourly rate (€)** in Users → Edit (yourself). When adding a client or matter, set **Client hourly rate (€)** or **Matter hourly rate (€)** in the Add form (optional). Change later via **Edit rate…** on each client or matter. Submatters without a rate use the nearest ancestor’s rate; if none, the user default.
+- **Move/Merge:** Use the matter menu (⋮) for “Move…” or “Merge…”. Target selection uses a searchable, folded-by-client list.
+- **Timesheet:** Under **Matter selection**, search and check the matters to export. Under **Export**, set **Save to folder** (the last used folder is remembered). Click **Export timesheet** to save `timesheet_YYYYMMDD_HHMMSS.json`; you can optionally mark exported entries as invoiced.
+- **Log out:** Use the **Log out** button in the top bar (next to “Logged in as …”). The left rail contains only the main tabs (Timer, Manage Matters, Reporting, Timesheet, and Users for admins).
 
 ## License
 
