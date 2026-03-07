@@ -839,9 +839,12 @@ class SentinelApp:
                     ft.Text("Start", size=12, weight=ft.FontWeight.W_500, width=90),
                     ft.Text("End", size=12, weight=ft.FontWeight.W_500, width=90),
                     ft.Text("Duration", size=12, weight=ft.FontWeight.W_500, width=100),
-                    ft.Tooltip(
-                        message=RATE_LEGEND_TOOLTIP,
-                        content=ft.Text("Amount (€)", size=12, weight=ft.FontWeight.W_500, width=90),
+                    ft.Text(
+                        "Amount (€)",
+                        size=12,
+                        weight=ft.FontWeight.W_500,
+                        width=90,
+                        tooltip=ft.Tooltip(message=RATE_LEGEND_TOOLTIP),
                     ),
                     ft.Container(width=90),
                     ft.Text("Actions", size=12, weight=ft.FontWeight.W_500, width=64),
@@ -2959,16 +2962,24 @@ class SentinelApp:
             options=[
                 ft.DropdownOption(key="most_uninvoiced", text="Most not invoiced time"),
                 ft.DropdownOption(key="most_accrued", text="Most accrued (total) time"),
+                ft.DropdownOption(key="most_used_budget", text="Most used up budget"),
             ],
             on_select=on_sort_change,
         )
 
+        def _client_sort_key(c: str) -> float:
+            if sort_value == "most_uninvoiced":
+                return sum(r[2] for r in by_client[c])  # not_invoiced_seconds
+            if sort_value == "most_used_budget":
+                return max(
+                    (budget_status_by_id.get(matter_id_by_path.get(r[0]), {}) or {}).get("ratio") or 0
+                    for r in by_client[c]
+                )
+            return sum(r[1] for r in by_client[c])  # total_seconds
+
         client_order = sorted(
             by_client.keys(),
-            key=lambda c: (
-                sum(r[2] for r in by_client[c]) if sort_value == "most_uninvoiced"  # not_invoiced_seconds
-                else sum(r[1] for r in by_client[c])  # total_seconds
-            ),
+            key=_client_sort_key,
             reverse=True,
         )
         # Expand first client by default so users see matters immediately
@@ -3146,9 +3157,12 @@ class SentinelApp:
                             ft.Text("Matter", size=12, weight=ft.FontWeight.W_500, width=280),
                             ft.Text("Description", size=12, weight=ft.FontWeight.W_500, width=180),
                             ft.Text("Duration", size=12, weight=ft.FontWeight.W_500, width=80),
-                            ft.Tooltip(
-                                message=RATE_LEGEND_TOOLTIP,
-                                content=ft.Text("Amount (€)", size=12, weight=ft.FontWeight.W_500, width=90),
+                            ft.Text(
+                                "Amount (€)",
+                                size=12,
+                                weight=ft.FontWeight.W_500,
+                                width=90,
+                                tooltip=ft.Tooltip(message=RATE_LEGEND_TOOLTIP),
                             ),
                         ],
                         spacing=8,
@@ -3230,16 +3244,25 @@ class SentinelApp:
                 ]
             controls = []
             by_client = _options_by_client_timesheet(path_list)
-            # Reuse reporting sort preference: most not-invoiced or most accrued (total) time
+            # Reuse reporting sort preference
             sort_value = (page.data or {}).get("reporting_sort") or "most_uninvoiced"
-            rows_data = self.db.get_time_by_client_and_matter_detailed()
-            client_sort_key: dict[str, float] = defaultdict(float)
-            for row in rows_data:
-                client_name, _, total_sec, not_inv_sec, *_ = row
-                if sort_value == "most_uninvoiced":
-                    client_sort_key[client_name] += not_inv_sec
-                else:
-                    client_sort_key[client_name] += total_sec
+            if sort_value == "most_used_budget":
+                client_sort_key = {
+                    c: max(
+                        (budget_status_by_id.get(mid, {}) or {}).get("ratio") or 0
+                        for mid, _ in items
+                    )
+                    for c, items in by_client.items()
+                }
+            else:
+                rows_data = self.db.get_time_by_client_and_matter_detailed()
+                client_sort_key = defaultdict(float)
+                for row in rows_data:
+                    client_name, _, total_sec, not_inv_sec, *_ = row
+                    if sort_value == "most_uninvoiced":
+                        client_sort_key[client_name] += not_inv_sec
+                    else:
+                        client_sort_key[client_name] += total_sec
             client_order = sorted(
                 by_client.keys(),
                 key=lambda c: client_sort_key.get(c, 0.0),
@@ -3457,21 +3480,22 @@ class SentinelApp:
         default_dir_str = (page.data or {}).get("timesheet_export_dir") or str(_default_export_dir())
         search_field = ft.TextField(
             label="Search matters by name or path",
-            width=400,
+            expand=True,
             ref=timesheet_search_ref,
             on_change=_on_search_change,
         )
         export_dir_field = ft.TextField(
             label="Save to folder",
             value=default_dir_str,
-            width=500,
+            expand=True,
             ref=export_dir_ref,
             hint_text="e.g. /home/you/Downloads or leave default",
         )
         only_not_invoiced_cb = ft.Checkbox(
-            label="Only include entries not yet marked as invoiced",
+            label="Only not invoiced",
             value=True,
             ref=only_not_invoiced_ref,
+            tooltip="Only include entries not yet marked as invoiced",
         )
         export_all_users_cb = ft.Checkbox(
             label="Export all users' time (admin only)",
@@ -3484,45 +3508,60 @@ class SentinelApp:
             controls=_build_timesheet_list_controls(""),
             scroll=ft.ScrollMode.AUTO,
         )
-        return ft.Column(
+        # Two-column layout: left = matter list, right = export + preview
+        left_column = ft.Column(
             [
-                ft.Text("Timesheet", size=24, weight=ft.FontWeight.BOLD),
-                ft.Container(height=16),
-                ft.Text("Matter selection", size=16, weight=ft.FontWeight.W_500),
-                ft.Container(height=8),
                 ft.Row(
                     [
-                        ft.TextButton(
-                            "Unselect all",
-                            on_click=_on_timesheet_clear_selection,
-                        ),
+                        search_field,
                         ft.Dropdown(
                             label="Sort clients by",
-                            width=280,
+                            width=200,
                             value=(page.data or {}).get("reporting_sort") or "most_uninvoiced",
                             options=[
                                 ft.DropdownOption(key="most_uninvoiced", text="Most not invoiced time"),
                                 ft.DropdownOption(key="most_accrued", text="Most accrued (total) time"),
+                                ft.DropdownOption(key="most_used_budget", text="Most used up budget"),
                             ],
                             on_select=_on_timesheet_sort_change,
                         ),
+                        ft.TextButton(
+                            "Unselect all",
+                            on_click=_on_timesheet_clear_selection,
+                        ),
                     ],
-                    spacing=24,
+                    spacing=8,
                     alignment=ft.MainAxisAlignment.START,
                 ),
-                ft.Container(height=8),
-                search_field,
-                ft.Container(height=8),
+                ft.Container(height=6),
                 ft.Container(content=list_column, expand=True),
-                ft.Container(height=24),
-                ft.Text("Export", size=16, weight=ft.FontWeight.W_500),
-                ft.Container(height=8),
+            ],
+            expand=True,
+            spacing=0,
+        )
+        preview_header = ft.Row(
+            [
+                ft.Text("Preview", size=14, weight=ft.FontWeight.W_500),
+                ft.Icon(
+                    ft.Icons.INFO_OUTLINE,
+                    size=16,
+                    tooltip=ft.Tooltip(message=RATE_LEGEND_TOOLTIP),
+                ),
+            ],
+            spacing=4,
+            alignment=ft.MainAxisAlignment.START,
+        )
+        right_column = ft.Column(
+            [
+                ft.Text("Export", size=14, weight=ft.FontWeight.W_500),
+                ft.Container(height=4),
                 export_dir_field,
-                ft.Container(height=8),
-                only_not_invoiced_cb,
-                ft.Container(height=8),
-                export_all_users_cb,
-                ft.Container(height=8),
+                ft.Container(height=4),
+                ft.Row(
+                    [only_not_invoiced_cb, export_all_users_cb],
+                    spacing=16,
+                ),
+                ft.Container(height=6),
                 ft.Row(
                     [
                         ft.ElevatedButton("Preview", icon=ft.Icons.LIST, on_click=_do_preview),
@@ -3530,12 +3569,30 @@ class SentinelApp:
                     ],
                     spacing=12,
                 ),
-                ft.Container(height=16),
-                ft.Text("Preview (amounts by rate source: green=matter, orange=upper, red=user)", size=12),
-                ft.Container(height=6),
+                ft.Container(height=8),
+                preview_header,
+                ft.Container(height=4),
                 ft.Container(
                     content=ft.Column(ref=timesheet_preview_ref, scroll=ft.ScrollMode.AUTO),
-                    height=180,
+                    expand=True,
+                ),
+            ],
+            expand=True,
+            spacing=0,
+            horizontal_alignment=ft.CrossAxisAlignment.START,
+        )
+        return ft.Column(
+            [
+                ft.Text("Timesheet", size=20, weight=ft.FontWeight.BOLD),
+                ft.Container(height=8),
+                ft.Row(
+                    [
+                        ft.Container(content=left_column, expand=True),
+                        ft.Container(width=16),
+                        ft.Container(content=right_column, expand=True),
+                    ],
+                    expand=True,
+                    spacing=0,
                 ),
             ],
             expand=True,
