@@ -23,7 +23,7 @@ from database_manager import DatabaseManager
 
 # --- Hierarchical matter creation ---
 
-
+@pytest.mark.integration
 class TestHierarchicalMatterCreation:
     """Test creating matters in a tree: root (client), children, grandchildren."""
 
@@ -58,6 +58,7 @@ class TestHierarchicalMatterCreation:
 # --- get_full_path accuracy ---
 
 
+@pytest.mark.integration
 class TestGetFullPath:
     """Test that get_matters_with_full_paths returns correct hierarchical paths."""
 
@@ -105,6 +106,7 @@ class TestGetFullPath:
 # --- suggest_unique_code (per-owner) ---
 
 
+@pytest.mark.integration
 class TestSuggestUniqueCode:
     """Test matter_code suggestion: slugify and per-owner uniqueness."""
 
@@ -137,6 +139,7 @@ class TestSuggestUniqueCode:
 # --- RLS-style filtering (owner_id) ---
 
 
+@pytest.mark.integration
 class TestOwnerFiltering:
     """Test that each user only sees and affects their own matters and time entries."""
 
@@ -277,6 +280,7 @@ class TestOwnerFiltering:
 # --- reporting aggregation (time by client/matter, total vs not invoiced) ---
 
 
+@pytest.mark.integration
 class TestReportingAggregation:
     """get_time_by_client_and_matter and get_time_by_client_and_matter_detailed."""
 
@@ -338,6 +342,7 @@ class TestReportingAggregation:
 # --- hourly rate resolution and update_matter / update_user ---
 
 
+@pytest.mark.integration
 class TestHourlyRates:
     """get_resolved_hourly_rate precedence, update_matter, update_user default_hourly_rate_euro."""
 
@@ -424,6 +429,7 @@ class TestHourlyRates:
 # --- continue task (activity_group_id) ---
 
 
+@pytest.mark.integration
 class TestContinueTimeEntry:
     """continue_time_entry creates a new running entry linked to the same activity group."""
 
@@ -466,6 +472,7 @@ class TestContinueTimeEntry:
 # --- delete_time_entry ---
 
 
+@pytest.mark.integration
 class TestDeleteTimeEntry:
     """delete_time_entry removes an entry; owner-scoped like other time entry ops."""
 
@@ -506,9 +513,7 @@ class TestDeleteTimeEntry:
             db_user2.delete_time_entry(entry.id)
 
 
-# --- matter budget ---
-
-
+@pytest.mark.integration
 class TestMatterBudget:
     """get_matter_budget_usage and get_matter_budget_status."""
 
@@ -628,6 +633,7 @@ class TestMatterBudget:
 # --- backup / restore ---
 
 
+@pytest.mark.integration
 class TestBackupRestore:
     """Full database export and import (admin only)."""
 
@@ -687,6 +693,7 @@ class TestBackupRestore:
 # --- require_user ---
 
 
+@pytest.mark.integration
 class TestRequireUser:
     """Operations that need current_user_id must raise when it is None."""
 
@@ -713,6 +720,7 @@ class TestRequireUser:
 # --- Matter sharing and per-user rates ---
 
 
+@pytest.mark.integration
 class TestMatterSharing:
     """Share matters with other users; shared user sees matter and time entries."""
 
@@ -755,6 +763,7 @@ class TestMatterSharing:
         assert any(e.owner_id == db_user1.current_user_id for e in entries)
 
 
+@pytest.mark.integration
 class TestUserMatterRate:
     """Per-user rate for a matter overrides matter and user default."""
 
@@ -781,6 +790,7 @@ class TestUserMatterRate:
         assert source == "matter"
 
 
+@pytest.mark.integration
 class TestSameNameConflict:
     """find_owned_matter_with_same_path when sharing."""
 

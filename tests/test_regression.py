@@ -17,15 +17,20 @@ import pytest
 from database_manager import DatabaseManager
 
 
+@pytest.mark.regression
 class TestUserAndMatterCreation:
     """Creating a User and a Matter."""
 
-    def test_create_first_user_and_matter(self, db_no_user: DatabaseManager, db_path):
+    def test_create_first_user_and_matter(self, db_path):
         """First user can be created via create_first_admin; then that user can create a matter."""
+        # Create a fresh database for this test (not from template)
+        import shutil
+        dm = DatabaseManager(db_path=str(db_path))
+        dm.init_db()
         pw_hash = bcrypt.hashpw(b"secret", bcrypt.gensalt()).decode("utf-8")
-        user_id = db_no_user.create_first_admin("alice", pw_hash)
+        user_id = dm.create_first_admin("alice", pw_hash)
         assert user_id is not None
-        db_alice = DatabaseManager(db_path=db_path, current_user_id=user_id)
+        db_alice = DatabaseManager(db_path=str(db_path), current_user_id=user_id)
         matter = db_alice.add_matter("My Client", "my-client", parent_id=None)
         assert matter.id is not None
         assert matter.name == "My Client"
@@ -40,6 +45,7 @@ class TestUserAndMatterCreation:
         assert matters[0].matter_code == "other-client"
 
 
+@pytest.mark.regression
 class TestGetFullPathRecursion:
     """Verifying get_full_path recursion works (multi-level hierarchy)."""
 
@@ -71,6 +77,7 @@ class TestGetFullPathRecursion:
         assert path_by_id[d.id] == "A > B > C > D"
 
 
+@pytest.mark.regression
 class TestPrivacyRlsCheck:
     """One user cannot see another user's matters (Privacy/RLS check)."""
 
@@ -99,6 +106,7 @@ class TestPrivacyRlsCheck:
             db_user2.start_timer(project.id)
 
 
+@pytest.mark.regression
 class TestTimerDurationCalculation:
     """Starting and stopping a timer: duration is calculated correctly."""
 
