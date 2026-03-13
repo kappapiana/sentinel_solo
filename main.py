@@ -170,6 +170,184 @@ class SentinelApp:
         self.matters_list_ref: ft.Ref[ft.Column] = ft.Ref()
         self.body_ref: ft.Ref[ft.Container] = ft.Ref()
         self.expanded_clients: set[str] = set()
+        # Track manual entry dialog ref for keyboard shortcut access
+        self.manual_entry_dialog_ref: ft.Ref[ft.AlertDialog] | None = None
+
+    def _close_active_dialog(self) -> None:
+        """Close the currently open dialog/modal."""
+        if self.page.dialog is not None:
+            self.page.dialog.open = False
+            self.page.update()
+
+    def _handle_start_stop_timer(self) -> None:
+        """Handle Ctrl+T: Start or stop the timer."""
+        page = self.page
+        if page.data is None:
+            return
+
+        # Get references from page.data
+        running_ref = page.data.get("running_ref", [False])
+        start_time_ref = page.data.get("start_time_ref", [None])
+        description_ref = page.data.get("description_ref")
+        timer_label_ref = page.data.get("timer_label_ref")
+        start_time_section_ref = page.data.get("start_time_section_ref")
+        start_time_field_ref = page.data.get("start_time_field_ref")
+        timer_matter_selected = page.data.get("timer_matter_selected", [None, None])
+
+        # Check if timer is running
+        if running_ref[0]:
+            # Stop the timer
+            self._stop_timer(page, running_ref, start_time_ref, description_ref, timer_label_ref, start_time_section_ref)
+        else:
+            # Start the timer
+            self._start_timer(page, matter_id=timer_matter_selected[0], start_time_ref=start_time_ref, running_ref=running_ref,
+                            description_ref=description_ref, timer_label_ref=timer_label_ref, start_time_section_ref=start_time_section_ref,
+                            start_time_field_ref=start_time_field_ref)
+
+    def _start_timer(self, page: ft.Page, matter_id: int | None, start_time_ref: list, running_ref: list,
+                     description_ref: ft.Ref[ft.TextField] | None, timer_label_ref: ft.Text | None,
+                     start_time_section_ref: ft.Ref[ft.Container] | None, start_time_field_ref: ft.Ref[ft.TextField] | None) -> None:
+        """Start the timer (extracted from on_start for keyboard shortcut use)."""
+        if matter_id is None:
+            page.snack_bar = ft.SnackBar(ft.Text("Select a matter from the list."), open=True)
+            page.update()
+            return
+
+        description = (description_ref.current.value or "").strip() if description_ref and description_ref.current else ""
+        try:
+            entry = self.db.start_timer(matter_id, description=description or None)
+        except ValueError as e:
+            page.snack_bar = ft.SnackBar(ft.Text(str(e)), open=True)
+            page.update()
+            return
+
+        start_time_ref[0] = entry.start_time
+        running_ref[0] = True
+        if timer_label_ref and timer_label_ref.current:
+            timer_label_ref.current.value = "00:00:00"
+        if start_time_section_ref and start_time_section_ref.current:
+            start_time_section_ref.current.visible = True
+        if start_time_field_ref and start_time_field_ref.current:
+            start_time_field_ref.current.value = format_datetime(start_time_ref[0])
+
+        # Show budget warning if needed
+        self._show_budget_snack_if_needed(page, matter_id)
+        page.run_task(self._timer_loop(page, running_ref, start_time_ref, timer_label_ref))
+        page.update()
+
+    def _stop_timer(self, page: ft.Page, running_ref: list, start_time_ref: list, description_ref: ft.Ref[ft.TextField] | None,
+                    timer_label_ref: ft.Text | None, start_time_section_ref: ft.Ref[ft.Container] | None) -> None:
+        """Stop the timer (extracted from on_stop for keyboard shortcut use)."""
+        if not running_ref[0]:
+            return
+
+        # Save current description to the running entry before stopping
+        if description_ref and description_ref.current:
+            desc = (description_ref.current.value or "").strip()
+            self.db.update_running_entry_description(desc)
+
+        running_ref[0] = False
+        if start_time_section_ref and start_time_section_ref.current:
+            start_time_section_ref.current.visible = False
+
+        entry = self.db.stop_timer()
+        if entry and timer_label_ref and timer_label_ref.current:
+            timer_label_ref.current.value = format_elapsed(entry.duration_seconds)
+
+        refresh = page.data.get("refresh_timer_activities") if page.data else None
+        if callable(refresh):
+            refresh()
+
+        if entry:
+            self._show_budget_snack_if_needed(page, entry.matter_id)
+
+        page.update()
+
+    def _get_selected_matter_id(self) -> int | None:
+        """Return selected matter id from the matter list (same for timer and manual)."""
+        # Access via page.data where timer_matter_selected is stored
+        if self.page.data is not None:
+            return self.page.data.get("timer_matter_selected", [None, None])[0]
+        return None
+
+    def _show_budget_snack_if_needed(self, page: ft.Page, matter_id: int | None) -> bool:
+        """Show snack bar when matter budget is near or over threshold. Returns True if shown."""
+        if matter_id is None:
+            return False
+        status = self.db.get_matter_budget_status(matter_id)
+        if status.get("budget_eur") is None or status["budget_eur"] <= 0:
+            return False
+        total = status["total_eur"]
+        budget = status["budget_eur"]
+        pct = int((status.get("ratio") or 0) * 100)
+        budget_in = status.get("budget_in")
+        budget_in_suffix = f" (Budget in {budget_in})" if budget_in else ""
+        if status.get("over_budget"):
+            page.snack_bar = ft.SnackBar(
+                ft.Text(f"Budget exceeded for this matter: {format_eur(total)} of {format_eur(budget)} logged.{budget_in_suffix}"),
+                open=True,
+            )
+            return True
+        if status.get("near_budget"):
+            page.snack_bar = ft.SnackBar(
+                ft.Text(f"Warning: budget for this matter is at {pct}% ({format_eur(total)} of {format_eur(budget)}).{budget_in_suffix}"),
+                open=True,
+            )
+            return True
+        return False
+
+    def _timer_loop(self, page: ft.Page, running_ref: list, start_time_ref: list, timer_label_ref: ft.Text | None) -> Callable[[], None]:
+        """Timer update loop (extracted from timer_loop for keyboard shortcut use)."""
+        async def _do():
+            while running_ref[0] and start_time_ref[0]:
+                await asyncio.sleep(1)
+                if not running_ref[0]:
+                    break
+                elapsed = (datetime.now() - start_time_ref[0]).total_seconds()
+                if timer_label_ref and timer_label_ref.current:
+                    timer_label_ref.current.value = format_elapsed(elapsed)
+                    timer_label_ref.current.update()
+        return _do
+
+    def _open_manual_entry_dialog(self) -> None:
+        """Open the manual entry dialog (extracted from _open_manual_entry_dialog for keyboard shortcut use)."""
+        page = self.page
+        matter_id = self._get_selected_matter_id()
+        if matter_id is None:
+            page.snack_bar = ft.SnackBar(ft.Text("Select a matter from the list."), open=True)
+            page.update()
+            return
+
+        # Access dialog via page.data where it's stored during timer tab build
+        manual_entry_dialog = (page.data or {}).get("_manual_entry_dialog")
+        if manual_entry_dialog:
+            manual_entry_dialog.open = True
+            page.update()
+        else:
+            # Fallback: show snack bar if dialog not available yet
+            page.snack_bar = ft.SnackBar(ft.Text("Manual entry dialog not ready."), open=True)
+            page.update()
+
+    def _save_current_data(self) -> None:
+        """Handle Ctrl+S: Save current data (trigger refresh to persist state)."""
+        # Trigger a refresh of timer activities which saves state
+        refresh = self.page.data.get("refresh_timer_activities")
+        if callable(refresh):
+            refresh()
+
+        # Also trigger reporting refresh if stale
+        if self.page.data is not None:
+            self.page.data["reporting_stale"] = True
+        refresh_reporting = self.page.data.get("refresh_reporting")
+        if callable(refresh_reporting):
+            refresh_reporting()
+
+        self.page.snack_bar = ft.SnackBar(ft.Text("Data saved."), open=True)
+        self.page.update()
+
+    def _quit_application(self) -> None:
+        """Handle Ctrl+Q: Quit the application."""
+        self.page.window.close()
 
     def setup(
         self,
@@ -182,6 +360,36 @@ class SentinelApp:
         page.theme_mode = ft.ThemeMode.DARK
         page.title = f"Sentinel Solo {__version__} - {current_username}"
         page.padding = 24
+
+        # Keyboard shortcut handling
+        def on_keyboard_event(e: ft.KeyboardEvent):
+            """Handle keyboard shortcuts for the application."""
+            # Check if a dialog is currently open - Esc should close it first
+            if e.data.key == "Escape" and page.dialog is not None:
+                self._close_active_dialog()
+                return
+
+            # Handle Ctrl+T (Start/Stop timer)
+            if e.data.ctrl and e.data.key == "t":
+                self._handle_start_stop_timer()
+                return
+
+            # Handle Ctrl+E (Open manual entry dialog)
+            if e.data.ctrl and e.data.key == "e":
+                self._open_manual_entry_dialog()
+                return
+
+            # Handle Ctrl+S (Save current data)
+            if e.data.ctrl and e.data.key == "s":
+                self._save_current_data()
+                return
+
+            # Handle Ctrl+Q (Quit application)
+            if e.data.ctrl and e.data.key == "q":
+                self._quit_application()
+                return
+
+        page.on_keyboard_event = on_keyboard_event
 
         timer_tab = self._build_timer_tab()
 
@@ -1355,6 +1563,17 @@ class SentinelApp:
         start_btn.on_click = on_start
         stop_btn.on_click = on_stop
 
+        # Store timer-related references for keyboard shortcut access
+        if page.data is None:
+            page.data = {}
+        page.data["timer_matter_selected"] = timer_matter_selected
+        page.data["running_ref"] = running_ref
+        page.data["start_time_ref"] = start_time_ref
+        page.data["description_ref"] = description_ref
+        page.data["timer_label_ref"] = timer_label
+        page.data["start_time_section_ref"] = start_time_section_ref
+        page.data["start_time_field_ref"] = start_time_field_ref
+
         def _safe_update(ctrl):
             """Update control only if it has been added to the page."""
             if ctrl is None:
@@ -1517,6 +1736,12 @@ class SentinelApp:
                 scroll=ft.ScrollMode.AUTO,
             ),
         )
+        # Store dialog reference for keyboard shortcut access
+        self.manual_entry_dialog_ref = manual_entry_dialog_ref
+        if page.data is None:
+            page.data = {}
+        page.data["_manual_entry_dialog"] = manual_entry_dialog
+
         page.overlay.append(manual_entry_dialog)
 
         manual_btn = ft.ElevatedButton(
