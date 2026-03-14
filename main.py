@@ -4,6 +4,8 @@ Multi-user: login required; each user sees only their matters and time entries.
 """
 import asyncio
 import json
+import logging
+import os
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -16,6 +18,18 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 
 from database_manager import DatabaseManager, db
 from utils import picker_value_to_local_date
+
+# Module-specific logger for Sentinel Solo
+logger = logging.getLogger(__name__)
+
+# Configure logging based on SENTINEL_DEBUG environment variable
+if os.environ.get("SENTINEL_DEBUG", "").lower() in ("1", "true", "yes"):
+    logger.setLevel(logging.DEBUG)
+    if not logger.handlers:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
 
 __version__ = "v0.4.0"
 
@@ -175,7 +189,8 @@ class SentinelApp:
 
     def _close_active_dialog(self) -> None:
         """Close the currently open dialog/modal."""
-        if self.page.dialog is not None:
+        # Flet uses page.dialog for the active dialog
+        if hasattr(self.page, 'dialog') and self.page.dialog is not None:
             self.page.dialog.open = False
             self.page.update()
 
@@ -361,36 +376,6 @@ class SentinelApp:
         page.title = f"Sentinel Solo {__version__} - {current_username}"
         page.padding = 24
 
-        # Keyboard shortcut handling
-        def on_keyboard_event(e: ft.KeyboardEvent):
-            """Handle keyboard shortcuts for the application."""
-            # Check if a dialog is currently open - Esc should close it first
-            if e.data.key == "Escape" and page.dialog is not None:
-                self._close_active_dialog()
-                return
-
-            # Handle Ctrl+T (Start/Stop timer)
-            if e.data.ctrl and e.data.key == "t":
-                self._handle_start_stop_timer()
-                return
-
-            # Handle Ctrl+E (Open manual entry dialog)
-            if e.data.ctrl and e.data.key == "e":
-                self._open_manual_entry_dialog()
-                return
-
-            # Handle Ctrl+S (Save current data)
-            if e.data.ctrl and e.data.key == "s":
-                self._save_current_data()
-                return
-
-            # Handle Ctrl+Q (Quit application)
-            if e.data.ctrl and e.data.key == "q":
-                self._quit_application()
-                return
-
-        page.on_keyboard_event = on_keyboard_event
-
         timer_tab = self._build_timer_tab()
 
         def refresh_timer_dropdown():
@@ -563,11 +548,58 @@ class SentinelApp:
 
         body = ft.Container(ref=self.body_ref, content=timer_container, expand=True)
 
+        # Centralized keyboard shortcut mapping for maintainability
+        SHORTCUTS: dict[tuple[str, bool], Callable[[], None]] = {
+            ("escape", False): self._close_active_dialog,
+            ("t", True): self._handle_start_stop_timer,
+            ("e", True): self._open_manual_entry_dialog,
+            ("s", True): self._save_current_data,
+            ("q", True): self._quit_application,
+        }
+
+        def on_keyboard_capture(e: ft.KeyboardEvent):
+            """Handle keyboard shortcuts for the application."""
+            # Access key and modifiers directly from KeyboardEvent (Flet's structure)
+            # e.data may be None; use direct attributes instead
+            key = e.key if e.key is not None else (e.data.key if e.data else None)
+            ctrl = e.ctrl if e.ctrl is not None else (e.data.ctrl if e.data else False)
+
+            if key is None:
+                return
+
+            # Check if a dialog is currently open - Esc should close it first
+            # Flet uses page.dialog for the active dialog
+            has_dialog = hasattr(page, 'dialog') and page.dialog is not None
+            if key == "Escape" and has_dialog:
+                self._close_active_dialog()
+                return
+
+            # Look up shortcut in centralized mapping
+            handler = SHORTCUTS.get((key.lower(), ctrl))
+            if handler:
+                handler()
+
+        # Attach keyboard event handler to the page for global shortcut support
+        page.on_keyboard_event = on_keyboard_capture
+
+        # Keyboard shortcuts hint tooltip with icon
         top_bar_controls: list[ft.Control] = [
             ft.Text(
                 f"Logged in as {current_username}",
                 size=14,
                 color=ft.Colors.ON_SURFACE_VARIANT,
+            ),
+            ft.IconButton(
+                icon=ft.Icons.KEYBOARD_ARROW_DOWN,
+                icon_size=20,
+                tooltip=(
+                    "Keyboard Shortcuts:\n"
+                    "Ctrl+T: Start/Stop Timer\n"
+                    "Ctrl+E: Manual Entry\n"
+                    "Ctrl+S: Save Data\n"
+                    "Ctrl+Q: Quit\n"
+                    "Esc: Close Dialog"
+                ),
             ),
         ]
         if logout_callback:
@@ -597,6 +629,7 @@ class SentinelApp:
                 expand=True,
             )
         )
+
         # Initial refresh of timer (matter list + near-budget banner)
         refresh = (page.data or {}).get("refresh_timer_matters")
         if refresh:
@@ -1030,7 +1063,6 @@ class SentinelApp:
                                 [change_date_btn, delete_btn],
                                 spacing=4,
                                 alignment=ft.MainAxisAlignment.END,
-                                width=64,
                             ),
                         ],
                         spacing=12,
@@ -1109,17 +1141,15 @@ class SentinelApp:
                     page.snack_bar = ft.SnackBar(ft.Text("Entry deleted."), open=True)
                 except ValueError as err:
                     page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
-                if page.dialog:
-                    page.dialog.open = False
                 refresh_activities()
+                dialog.open = False
                 page.update()
 
             def on_cancel(_):
-                if page.dialog:
-                    page.dialog.open = False
+                dialog.open = False
                 page.update()
 
-            page.dialog = ft.AlertDialog(
+            dialog = ft.AlertDialog(
                 title=ft.Text("Delete time entry"),
                 content=ft.Text(
                     "Are you sure you want to delete this time entry? This cannot be undone.",
@@ -1131,7 +1161,8 @@ class SentinelApp:
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
             )
-            page.dialog.open = True
+            page.overlay.append(dialog)
+            dialog.open = True
             page.update()
 
         def open_activity_change_date_dialog(entry_id: int) -> None:
@@ -1182,17 +1213,15 @@ class SentinelApp:
                     page.snack_bar = ft.SnackBar(ft.Text("Date updated."), open=True)
                 except ValueError as err:
                     page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
-                if page.dialog:
-                    page.dialog.open = False
                 refresh_activities()
+                dialog.open = False
                 page.update()
 
             def on_cancel(_):
-                if page.dialog:
-                    page.dialog.open = False
+                dialog.open = False
                 page.update()
 
-            page.dialog = ft.AlertDialog(
+            dialog = ft.AlertDialog(
                 title=ft.Text("Change entry date"),
                 content=ft.Column(
                     [
@@ -1227,7 +1256,8 @@ class SentinelApp:
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
             )
-            page.dialog.open = True
+            page.overlay.append(dialog)
+            dialog.open = True
             page.update()
 
         initial_activities_controls: list[ft.Control] = _build_activities_rows()
@@ -2399,6 +2429,7 @@ class SentinelApp:
                 rate, rate_source = self.db.get_resolved_hourly_rate(entry.matter_id, entry.owner_id)
                 amount_eur = self.db.amount_eur_from_seconds(dur_sec, rate)
                 amount_color = _rate_source_color(rate_source)
+
                 def _on_continue_from_dialog(ent):
                     try:
                         self.db.continue_time_entry(ent.id)
@@ -2408,27 +2439,152 @@ class SentinelApp:
                         page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                     page.update()
 
-                controls.append(
-                    ft.ListTile(
-                        width=560,
-                        title=ft.Text(desc or "(no description)", size=14, no_wrap=True),
-                        subtitle=ft.Row(
-                            [
-                                ft.Text(f"{format_datetime(entry.start_time)} → {end_str}  ·  {dur_str}", size=12),
-                                ft.Text("  ", size=12),
-                                ft.Text(format_eur(amount_eur), size=12, color=amount_color),
-                            ],
-                            wrap=True,
+                def _on_delete_entry(ent):
+                    """Open delete confirmation dialog for the time entry."""
+                    def on_confirm(_):
+                        try:
+                            self.db.delete_time_entry(ent.id)
+                            page.snack_bar = ft.SnackBar(ft.Text("Entry deleted."), open=True)
+                        except ValueError as err:
+                            page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                        dialog.open = False
+                        refresh_time_entries_list()
+                        page.update()
+
+                    def on_cancel(_):
+                        dialog.open = False
+                        page.update()
+
+                    dialog = ft.AlertDialog(
+                        title=ft.Text("Delete time entry"),
+                        content=ft.Text(
+                            "Are you sure you want to delete this time entry? This cannot be undone.",
+                            size=12,
                         ),
-                        trailing=ft.Row(
+                        actions=[
+                            ft.TextButton("Delete", on_click=on_confirm),
+                            ft.TextButton("Cancel", on_click=on_cancel),
+                        ],
+                        actions_alignment=ft.MainAxisAlignment.END,
+                    )
+                    page.overlay.append(dialog)
+                    dialog.open = True
+                    page.update()
+
+                def _on_change_date_entry(ent):
+                    """Open change date dialog for the time entry."""
+                    if ent.end_time is None:
+                        page.snack_bar = ft.SnackBar(
+                            ft.Text("Stop the timer for this entry before changing its date."),
+                            open=True,
+                        )
+                        page.update()
+                        return
+
+                    date_field = ft.TextField(
+                        label="New date (YYYY-MM-DD)",
+                        width=200,
+                        value=ent.start_time.date().isoformat(),
+                    )
+
+                    def on_save(_):
+                        raw = (date_field.value or "").strip()
+                        try:
+                            new_date = datetime.strptime(raw, "%Y-%m-%d").date()
+                        except ValueError:
+                            page.snack_bar = ft.SnackBar(
+                                ft.Text("Invalid date. Use YYYY-MM-DD."), open=True
+                            )
+                            page.update()
+                            return
+
+                        start_t = ent.start_time.time()
+                        end_t = ent.end_time.time() if ent.end_time else None
+                        new_start = datetime.combine(new_date, start_t)
+                        kwargs: dict = {
+                            "start_time": new_start,
+                            "duration_seconds": ent.duration_seconds or 0.0,
+                        }
+                        if end_t is not None:
+                            new_end = datetime.combine(new_date, end_t)
+                            kwargs["end_time"] = new_end
+                        try:
+                            self.db.update_time_entry(ent.id, **kwargs)
+                            page.snack_bar = ft.SnackBar(ft.Text("Date updated."), open=True)
+                        except ValueError as err:
+                            page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                        if time_entries_dialog_ref.current:
+                            time_entries_dialog_ref.current.open = False
+                        refresh_time_entries_list()
+                        page.update()
+
+                    def on_cancel(_):
+                        if time_entries_dialog_ref.current:
+                            time_entries_dialog_ref.current.open = False
+                        page.update()
+
+                    dialog = ft.AlertDialog(
+                        title=ft.Text("Change entry date"),
+                        content=ft.Column(
                             [
-                                ft.OutlinedButton(
-                                    content=ft.Text("Continue", size=9, no_wrap=True),
-                                    on_click=lambda e, ent=entry: _on_continue_from_dialog(ent),
+                                ft.Text(
+                                    "Change the calendar day of this entry. Start and end times stay the same.",
+                                    size=12,
+                                    width=360,
                                 ),
-                                ft.IconButton(icon=ft.Icons.EDIT, on_click=lambda e, ent=entry: open_edit_entry_dialog(ent)),
+                                date_field,
                             ],
-                            spacing=4,
+                            tight=True,
+                        ),
+                        actions=[
+                            ft.TextButton("Save", on_click=on_save),
+                            ft.TextButton("Cancel", on_click=on_cancel),
+                        ],
+                        actions_alignment=ft.MainAxisAlignment.END,
+                    )
+                    page.overlay.append(dialog)
+                    dialog.open = True
+                    page.update()
+
+                controls.append(
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Row(
+                                    [
+                                        ft.Text(desc or "(no description)", size=14, expand=True),
+                                        ft.Row(
+                                            [
+                                                ft.OutlinedButton(
+                                                    content=ft.Text("Continue", size=9, no_wrap=True),
+                                                    on_click=lambda e, ent=entry: _on_continue_from_dialog(ent),
+                                                ),
+                                                ft.IconButton(icon=ft.Icons.EDIT, on_click=lambda e, ent=entry: open_edit_entry_dialog(ent)),
+                                                ft.IconButton(
+                                                    icon=ft.Icons.EVENT,
+                                                    tooltip="Change date",
+                                                    icon_size=18,
+                                                    on_click=lambda e, ent=entry: _on_change_date_entry(ent),
+                                                ),
+                                                ft.IconButton(
+                                                    icon=ft.Icons.DELETE_OUTLINE,
+                                                    tooltip="Delete this entry",
+                                                    icon_size=18,
+                                                    on_click=lambda e, ent=entry: _on_delete_entry(ent),
+                                                ),
+                                            ],
+                                            spacing=4,
+                                        ),
+                                    ],
+                                ),
+                                ft.Row(
+                                    [
+                                        ft.Text(f"{format_datetime(entry.start_time)} → {end_str}  ·  {dur_str}", size=12),
+                                        ft.Text("  ", size=12),
+                                        ft.Text(format_eur(amount_eur), size=12, color=amount_color),
+                                    ],
+                                ),
+                            ],
                         ),
                     ),
                 )
@@ -3093,6 +3249,7 @@ class SentinelApp:
                         content=ft.ListView(
                             ref=time_entries_list_ref,
                             expand=True,
+                            scroll=ft.ScrollMode.AUTO,
                         ),
                         height=280,
                         width=600,
@@ -4264,7 +4421,9 @@ class SentinelApp:
             page.run_task(_clear_and_logout)
 
         def _open_import_confirm(_):
-            path_str = (backup_import_path_ref.current.value or "").strip() if backup_import_path_ref.current else ""
+            # Guard against None current - the ref may not have a control yet
+            current = backup_import_path_ref.current if backup_import_path_ref.current is not None else None
+            path_str = (current.value or "").strip() if current else ""
             if not path_str:
                 page.snack_bar = ft.SnackBar(content=ft.Text("Enter the path to the backup file."))
                 page.snack_bar.open = True
@@ -4577,7 +4736,7 @@ async def main(page: ft.Page) -> None:
         page.add(ft.SafeArea(ft.Container(view, expand=True)))
         page.update()
 
-    # Always show the login / first-admin screen on app start.
+    # Show the login / first-admin screen on app start.
     show_login()
 
 
