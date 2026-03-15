@@ -3,6 +3,10 @@
 **Project**: Sentinel Solo - A multi-user desktop time-tracking application built with Python/Flet that supports PostgreSQL Row Level Security (RLS) for data privacy.
 
 **Version**: v0.4.0
+**Status:** ✅ Current
+**Last Updated:** 2026-03-15
+
+**See Also:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md) for current development priorities.
 
 ---
 

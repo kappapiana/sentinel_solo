@@ -4,6 +4,10 @@ A desktop time-tracking app with a hierarchy of **clients** and **matters** (pro
 
 **Tech stack:** Python 3.12, [Flet](https://flet.dev/) (GUI), SQLAlchemy. Database: SQLite (default) or PostgreSQL (remote).
 
+**Development Status:** Production-ready
+**Next Features:** [CSV Export](plans/csv_export_implementation_plan.md), [Test Optimization](plans/test_optimization_plan.md)
+**Implementation Roadmap:** See [`plans/IMPLEMENTATION_ROADMAP.md`](plans/IMPLEMENTATION_ROADMAP.md) for current development priorities and phase plan
+
 ## Features
 
 - **Timer** – **Start timing first:** at the top, a matter chip shows the current selection; below it a compact searchable matter list (clients folded by default). **Start** / **Stop** and **Manual entry** are right there so you can start or stop the timer without scrolling. **Today’s activities** (list of today’s time entries with editable Matter, Description, Start, End, Duration, **Amount (€)**) sit below in a **collapsible** section. Amounts are color-coded by rate source (see **Hourly rates** below; a tooltip on the column header explains the colors in-app).

@@ -1,8 +1,14 @@
 # CSV Export Implementation Plan - Sentinel Solo Time-Tracking Application
 
+**Status:** ✅ Plan Ready (Not Yet Implemented)
+**Priority:** High
+**Last Updated:** 2026-03-15
+
 ## Executive Summary
 
 This document outlines the implementation plan for adding CSV export functionality to the Sentinel Solo time-tracking application. This enhancement provides users with an alternative export format optimized for spreadsheet compatibility, complementing the existing JSON export feature.
+
+**See Also:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md) for current development priorities.
 
 ---
 
