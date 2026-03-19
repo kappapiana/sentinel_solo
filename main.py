@@ -3036,25 +3036,50 @@ class SentinelApp:
                 return
             by_client = _by_client()
             all_entries = [
-                (c, path, code)
+                (c, path, code, mid)
                 for c, items in by_client.items()
-                for (_, path, code, _, _) in items
+                for (mid, path, code, _, _) in items
             ]
-            all_entries.extend((c, c, "") for c in by_client.keys())  # clients as entries too
+            all_entries.extend((c, c, "", None) for c in by_client.keys())  # clients as entries too
             q = (e.control.value or "").strip().lower()
             if not q:
                 search_results_ref.current.controls = []
                 search_results_ref.current.visible = False
             else:
                 matching = [x for x in all_entries if q in x[0].lower() or q in x[1].lower()][:6]
-                search_results_ref.current.controls = [
-                    ft.ListTile(
-                        title=ft.Text(path or client, size=14),
-                        subtitle=ft.Text(f"{client}" + (f" · {code}" if code else ""), size=12),
+                # Group matching matters by client
+                matched_by_client: dict[str, list[tuple[int, str, str]]] = defaultdict(list)
+                for client, path, code, mid in matching:
+                    if mid is not None:  # Only group actual matters, not clients
+                        matched_by_client[client].append((mid, path, code))
+                # Build controls showing clients with their matching matters expanded
+                controls = []
+                for client in sorted(matched_by_client.keys()):
+                    matters = matched_by_client[client]
+                    controls.append(
+                        ft.ListTile(
+                            title=ft.Text(client, weight=ft.FontWeight.W_500, size=14),
+                            subtitle=ft.Text(f"{len(matters)} matter(s)", size=12),
+                            trailing=ft.Icon(ft.Icons.EXPAND_LESS, size=20),
+                        ),
                     )
-                    for client, path, code in matching
-                ]
-                search_results_ref.current.visible = bool(matching)
+                    controls.append(
+                        ft.Container(
+                            content=ft.Column(
+                                [
+                                    ft.ListTile(
+                                        title=ft.Text(path, size=14),
+                                        subtitle=ft.Text(code if code else "", size=12),
+                                    )
+                                    for mid, path, code in matters
+                                ],
+                            ),
+                            visible=True,
+                            padding=ft.Padding.only(left=24),
+                        ),
+                    )
+                search_results_ref.current.controls = controls
+                search_results_ref.current.visible = bool(matched_by_client)
             page.update()
 
         parent_options_data_initial = self.db.get_matters_with_full_paths()
