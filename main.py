@@ -31,7 +31,7 @@ if os.environ.get("SENTINEL_DEBUG", "").lower() in ("1", "true", "yes"):
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         )
 
-__version__ = "v0.4.1"
+__version__ = "v0.4.2"
 
 # Storage keys for persisted login (optional restore)
 STORAGE_USER_ID = "user_id"
