@@ -3427,7 +3427,6 @@ class SentinelApp:
         expanded_clients = self.expanded_clients
         if rows_data is None:
             rows_data = self.db.get_time_by_client_and_matter_detailed()
-        search_results_ref = ft.Ref[ft.Column]()
         sort_value = (page.data or {}).get("reporting_sort") or "most_uninvoiced"
 
         if not rows_data:
@@ -3521,49 +3520,20 @@ class SentinelApp:
                 subtitle=ft.Row(subtitle_parts, wrap=True),
             )
 
-        def on_search(e):
-            if not search_results_ref.current:
-                return
-            q = (e.control.value or "").strip().lower()
-            if not q:
-                search_results_ref.current.controls = []
-                search_results_ref.current.visible = False
-            else:
-                _match_list = [r for r in rows_data if q in r[0].lower() or q in r[1].lower()][:6]
-                search_results_ref.current.controls = [
-                    ft.ListTile(
-                        title=ft.Text(matter_path, size=14),
-                        subtitle=ft.Text(
-                            f"{client_name} · Total {format_elapsed(sec)} · Not inv. {format_elapsed(ni)} · {format_eur(ta)} (not inv. {format_eur(na)})",
-                            size=12,
-                        ),
-                    )
-                    for (client_name, matter_path, sec, ni, ta, na, _) in _match_list
-                ]
-                search_results_ref.current.visible = bool(_match_list)
-            page.update()
-
-        search_field = ft.TextField(
-            label="Search clients and matters",
-            width=400,
-            on_change=on_search,
-        )
-
-        search_results_column = ft.Column(
-            ref=search_results_ref,
-            visible=False,
-            scroll=ft.ScrollMode.AUTO,
-        )
-
-        client_blocks = []
+        # Build initial client blocks (empty search shows all)
+        initial_client_blocks = []
         for client_name in client_order:
-            matter_rows = by_client[client_name]
+            filtered_matter_rows = by_client[client_name][:]
+            if not filtered_matter_rows:
+                continue
+                
+            matter_rows = filtered_matter_rows
             client_total = sum(r[1] for r in matter_rows)
             client_not_invoiced = sum(r[2] for r in matter_rows)
             client_total_eur = sum(r[3] for r in matter_rows)
             client_not_inv_eur = sum(r[4] for r in matter_rows)
             is_expanded = client_name in expanded_clients
-            client_blocks.append(
+            initial_client_blocks.append(
                 ft.Column(
                     [
                         ft.ListTile(
@@ -3593,6 +3563,77 @@ class SentinelApp:
                 )
             )
 
+        # Create the container that will hold the (potentially filtered) client blocks
+        client_blocks_container = ft.Container(
+            content=ft.Column(initial_client_blocks, scroll=ft.ScrollMode.AUTO),
+            expand=True,
+        )
+
+        search_field = ft.TextField(
+            label="Filter clients and matters",
+            width=400,
+        )
+
+        def on_search(e):
+            # Rebuild client blocks with the current search query
+            search_query = (search_field.value or "").strip().lower()
+            filtered_client_blocks = []
+            for client_name in client_order:
+                # If search query is empty, show all matters; otherwise filter
+                if not search_query:
+                    filtered_matter_rows = by_client[client_name][:]
+                else:
+                    filtered_matter_rows = [
+                        r for r in by_client[client_name]
+                        if search_query in client_name.lower() or search_query in r[0].lower()
+                    ]
+                
+                # Skip client if no matters match the filter
+                if not filtered_matter_rows:
+                    continue
+                    
+                matter_rows = filtered_matter_rows
+                client_total = sum(r[1] for r in matter_rows)
+                client_not_invoiced = sum(r[2] for r in matter_rows)
+                client_total_eur = sum(r[3] for r in matter_rows)
+                client_not_inv_eur = sum(r[4] for r in matter_rows)
+                is_expanded = client_name in expanded_clients
+                filtered_client_blocks.append(
+                    ft.Column(
+                        [
+                            ft.ListTile(
+                                title=ft.Text(client_name, weight=ft.FontWeight.W_500),
+                                subtitle=ft.Text(
+                                    f"Total {format_elapsed(client_total)} · Not inv. {format_elapsed(client_not_invoiced)} · Chargeable {format_eur(client_total_eur)} (not inv. {format_eur(client_not_inv_eur)})",
+                                    size=12,
+                                ),
+                                trailing=ft.Icon(
+                                    ft.Icons.EXPAND_LESS if is_expanded else ft.Icons.EXPAND_MORE,
+                                ),
+                                on_click=lambda e, c=client_name: on_toggle_client(c),
+                            ),
+                            ft.Container(
+                                content=ft.Column(
+                                    [
+                                        _reporting_matter_row(matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_inv_amount_eur, rate_source, matter_id_by_path, budget_status_by_id)
+                                        for (matter_path, total_seconds, not_invoiced_seconds, total_amount_eur, not_inv_amount_eur, rate_source) in sorted(
+                                            matter_rows, key=lambda r: r[0]
+                                        )
+                                    ],
+                                ),
+                                visible=is_expanded,
+                                padding=ft.Padding.only(left=24),
+                            ),
+                        ],
+                    )
+                )
+            
+            # Update the client blocks in the UI
+            client_blocks_container.content.controls = filtered_client_blocks
+            page.update()
+
+        search_field.on_change = on_search
+
         return ft.Column(
             [
                 ft.Text("Reporting", size=24, weight=ft.FontWeight.BOLD),
@@ -3600,16 +3641,11 @@ class SentinelApp:
                 sort_dropdown,
                 ft.Container(height=8),
                 search_field,
-                ft.Container(height=8),
-                search_results_column,
                 ft.Container(height=16),
                 ft.Text("By client", size=16, weight=ft.FontWeight.W_500),
                 ft.Text(RATE_LEGEND_TOOLTIP, size=11, color=ft.Colors.ON_SURFACE_VARIANT),
                 ft.Container(height=8),
-                ft.Container(
-                    content=ft.Column(client_blocks, scroll=ft.ScrollMode.AUTO),
-                    expand=True,
-                ),
+                client_blocks_container,
             ],
             expand=True,
             horizontal_alignment=ft.CrossAxisAlignment.START,
