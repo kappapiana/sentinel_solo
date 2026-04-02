@@ -1150,11 +1150,11 @@ class SentinelApp:
             """Ask confirmation, then delete the entry and refresh Today's activities."""
 
             def on_confirm(_):
-                    try:
-                        self.db.delete_time_entry(entry_id)
-                        page.snack_bar = ft.SnackBar(ft.Text("Entry deleted."), open=True)
-                    except (TimeEntryNotFoundError, ValidationError) as err:
-                        page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                try:
+                    self.db.delete_time_entry(entry_id)
+                    page.snack_bar = ft.SnackBar(ft.Text("Entry deleted."), open=True)
+                except (TimeEntryNotFoundError, ValidationError) as err:
+                    page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                 refresh_activities()
                 dialog.open = False
                 page.update()
@@ -2851,7 +2851,7 @@ class SentinelApp:
                         edit_matter_dialog_ref.current.open = False
                     refresh_list()
                     page.snack_bar = ft.SnackBar(ft.Text("Your rate for this matter updated."), open=True)
-                except (ValidationError, PermissionError) as err:
+                except (ValidationError, PermissionError, MatterNotFoundError) as err:
                     if edit_matter_my_rate_ref.current:
                         edit_matter_my_rate_ref.current.error_text = str(err)
             page.update()
