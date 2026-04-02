@@ -19,6 +19,20 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from database_manager import DatabaseManager, db
 from utils import picker_value_to_local_date
 
+from exceptions import (
+    MatterNotFoundError,
+    TimeEntryNotFoundError,
+    UserNotFoundError,
+    RateResolutionError,
+    BudgetError,
+    BudgetExceededError,
+    PermissionError,
+    InvalidBackupError,
+    DatabaseIntegrityError,
+    DatabaseConnectionError,
+    ValidationError,
+)
+
 # Module-specific logger for Sentinel Solo
 logger = logging.getLogger(__name__)
 
@@ -231,7 +245,7 @@ class SentinelApp:
         description = (description_ref.current.value or "").strip() if description_ref and description_ref.current else ""
         try:
             entry = self.db.start_timer(matter_id, description=description or None)
-        except ValueError as e:
+        except (MatterNotFoundError, ValidationError) as e:
             page.snack_bar = ft.SnackBar(ft.Text(str(e)), open=True)
             page.update()
             return
@@ -648,7 +662,7 @@ class SentinelApp:
             """Create a new running entry with same matter/description (Continue task) and start timer UI."""
             try:
                 new_entry = self.db.continue_time_entry(entry_id)
-            except ValueError as err:
+            except (ValidationError, TimeEntryNotFoundError) as err:
                 page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                 page.update()
                 return
@@ -934,7 +948,7 @@ class SentinelApp:
                         mid = int(val)
                         self.db.update_time_entry(eid, matter_id=mid)
                         page.snack_bar = ft.SnackBar(ft.Text("Matter updated."), open=True)
-                    except ValueError as err:
+                    except (MatterNotFoundError, ValidationError) as err:
                         page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                     _refresh_activities()
                     page.update()
@@ -954,13 +968,13 @@ class SentinelApp:
                         try:
                             self.db.delete_time_entry(eid)
                             page.snack_bar = ft.SnackBar(ft.Text("Entry removed (zero duration)."), open=True)
-                        except ValueError as err:
+                        except (TimeEntryNotFoundError, ValidationError) as err:
                             page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                     else:
                         try:
                             self.db.update_time_entry(eid, start_time=new_start, end_time=new_end, duration_seconds=dur)
                             page.snack_bar = ft.SnackBar(ft.Text("Start updated."), open=True)
-                        except ValueError as err:
+                        except (TimeEntryNotFoundError, ValidationError) as err:
                             page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                     _refresh_activities()
                     page.update()
@@ -985,13 +999,13 @@ class SentinelApp:
                         try:
                             self.db.delete_time_entry(eid)
                             page.snack_bar = ft.SnackBar(ft.Text("Entry removed (zero duration)."), open=True)
-                        except ValueError as err:
+                        except (TimeEntryNotFoundError, ValidationError) as err:
                             page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                     else:
                         try:
                             self.db.update_time_entry(eid, start_time=entry.start_time, end_time=new_end)
                             page.snack_bar = ft.SnackBar(ft.Text("End updated."), open=True)
-                        except ValueError as err:
+                        except (TimeEntryNotFoundError, ValidationError) as err:
                             page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                     _refresh_activities()
                     page.update()
@@ -1010,14 +1024,14 @@ class SentinelApp:
                         try:
                             self.db.delete_time_entry(eid)
                             page.snack_bar = ft.SnackBar(ft.Text("Entry removed (zero duration)."), open=True)
-                        except ValueError as err:
+                        except (TimeEntryNotFoundError, ValidationError) as err:
                             page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                     else:
                         new_end = entry.start_time + timedelta(seconds=new_dur)
                         try:
                             self.db.update_time_entry(eid, start_time=entry.start_time, duration_seconds=new_dur)
                             page.snack_bar = ft.SnackBar(ft.Text("Duration updated."), open=True)
-                        except ValueError as err:
+                        except (TimeEntryNotFoundError, ValidationError) as err:
                             page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                     _refresh_activities()
                     page.update()
@@ -1027,7 +1041,7 @@ class SentinelApp:
                     try:
                         self.db.update_time_entry(eid, description=val if val else None)
                         page.snack_bar = ft.SnackBar(ft.Text("Description updated."), open=True)
-                    except ValueError as err:
+                    except (TimeEntryNotFoundError, ValidationError) as err:
                         page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                     _refresh_activities()
                     page.update()
@@ -1136,11 +1150,11 @@ class SentinelApp:
             """Ask confirmation, then delete the entry and refresh Today's activities."""
 
             def on_confirm(_):
-                try:
-                    self.db.delete_time_entry(entry_id)
-                    page.snack_bar = ft.SnackBar(ft.Text("Entry deleted."), open=True)
-                except ValueError as err:
-                    page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
+                    try:
+                        self.db.delete_time_entry(entry_id)
+                        page.snack_bar = ft.SnackBar(ft.Text("Entry deleted."), open=True)
+                    except (TimeEntryNotFoundError, ValidationError) as err:
+                        page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                 refresh_activities()
                 dialog.open = False
                 page.update()
@@ -1211,7 +1225,7 @@ class SentinelApp:
                 try:
                     self.db.update_time_entry(entry_id, **kwargs)
                     page.snack_bar = ft.SnackBar(ft.Text("Date updated."), open=True)
-                except ValueError as err:
+                except (TimeEntryNotFoundError, ValidationError) as err:
                     page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                 refresh_activities()
                 dialog.open = False
@@ -1471,7 +1485,7 @@ class SentinelApp:
             description = (description_ref.current.value or "").strip() if description_ref.current else ""
             try:
                 entry = self.db.start_timer(matter_id, description=description or None)
-            except ValueError as e:
+            except (MatterNotFoundError, ValidationError) as e:
                 page.snack_bar = ft.SnackBar(ft.Text(str(e)), open=True)
                 page.update()
                 return
@@ -1563,7 +1577,7 @@ class SentinelApp:
                 return
             try:
                 self.db.add_manual_time_entry(matter_id, desc, start_time=start_t, end_time=end_t, duration_seconds=dur)
-            except ValueError as err:
+            except (MatterNotFoundError, ValidationError) as err:
                 page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                 page.update()
                 return
@@ -2234,7 +2248,7 @@ class SentinelApp:
             new_parent_id = sel[0]
             try:
                 self.db.move_matter(move_source[0], new_parent_id)
-            except ValueError as err:
+            except (MatterNotFoundError, ValidationError) as err:
                 page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                 page.update()
                 return
@@ -2276,7 +2290,7 @@ class SentinelApp:
             target_id = sel[0]
             try:
                 self.db.merge_matter_into(merge_source[0], target_id)
-            except ValueError as err:
+            except (MatterNotFoundError, ValidationError) as err:
                 page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                 page.update()
                 return
@@ -2300,7 +2314,7 @@ class SentinelApp:
                 return []
             try:
                 users = self.db.list_matter_shares(mid)
-            except ValueError:
+            except MatterNotFoundError:
                 return []
             return [
                 ft.ListTile(
@@ -2360,7 +2374,7 @@ class SentinelApp:
                 refresh_share_list()
                 share_add_dropdown_ref.current.value = None
                 page.snack_bar = ft.SnackBar(ft.Text("Matter shared."), open=True)
-            except ValueError as err:
+            except (MatterNotFoundError, PermissionError, ValidationError) as err:
                 page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
             page.update()
     
@@ -2372,7 +2386,7 @@ class SentinelApp:
                 self.db.remove_matter_share(mid, user_id)
                 refresh_share_list()
                 page.snack_bar = ft.SnackBar(ft.Text("Share removed."), open=True)
-            except ValueError as err:
+            except (MatterNotFoundError, PermissionError) as err:
                 page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
             page.update()
     
@@ -2396,7 +2410,7 @@ class SentinelApp:
                     ft.Text(f"Merged {username}'s matter into this one and shared."),
                     open=True,
                 )
-            except ValueError as err:
+            except (MatterNotFoundError, PermissionError, ValidationError) as err:
                 page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
             page.update()
     
@@ -2435,7 +2449,7 @@ class SentinelApp:
                         self.db.continue_time_entry(ent.id)
                         refresh_time_entries_list()
                         page.snack_bar = ft.SnackBar(ft.Text("Continued task; new entry is running. Switch to Timer to see it."), open=True)
-                    except ValueError as err:
+                    except (TimeEntryNotFoundError, ValidationError) as err:
                         page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                     page.update()
 
@@ -2445,7 +2459,7 @@ class SentinelApp:
                         try:
                             self.db.delete_time_entry(ent.id)
                             page.snack_bar = ft.SnackBar(ft.Text("Entry deleted."), open=True)
-                        except ValueError as err:
+                        except (TimeEntryNotFoundError, ValidationError) as err:
                             page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                         dialog.open = False
                         refresh_time_entries_list()
@@ -2511,7 +2525,7 @@ class SentinelApp:
                         try:
                             self.db.update_time_entry(ent.id, **kwargs)
                             page.snack_bar = ft.SnackBar(ft.Text("Date updated."), open=True)
-                        except ValueError as err:
+                        except (TimeEntryNotFoundError, ValidationError) as err:
                             page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                         if time_entries_dialog_ref.current:
                             time_entries_dialog_ref.current.open = False
@@ -2637,7 +2651,7 @@ class SentinelApp:
                 return
             try:
                 self.db.update_time_entry(eid, description=desc.strip(), start_time=start_t, end_time=end_t, duration_seconds=dur)
-            except ValueError as err:
+            except (TimeEntryNotFoundError, ValidationError) as err:
                 page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                 page.update()
                 return
@@ -2680,7 +2694,7 @@ class SentinelApp:
                 return
             try:
                 self.db.add_manual_time_entry(mid, desc, start_time=start_t, end_time=end_t, duration_seconds=dur)
-            except ValueError as err:
+            except (MatterNotFoundError, ValidationError) as err:
                 page.snack_bar = ft.SnackBar(ft.Text(str(err)), open=True)
                 page.update()
                 return
@@ -2733,7 +2747,7 @@ class SentinelApp:
                     my_rate = next((r for uid, _, r in users_rates if uid == cur), None)
                     edit_matter_my_rate_ref.current.value = str(my_rate) if my_rate is not None else ""
                     edit_matter_my_rate_ref.current.error_text = None
-                except ValueError:
+                except MatterNotFoundError:
                     edit_matter_my_rate_ref.current.value = ""
             if edit_matter_budget_container_ref.current:
                 edit_matter_budget_container_ref.current.visible = is_owner
@@ -2815,7 +2829,7 @@ class SentinelApp:
                     if on_matters_changed:
                         on_matters_changed()
                     page.snack_bar = ft.SnackBar(ft.Text("Matter updated."), open=True)
-                except ValueError as err:
+                except (MatterNotFoundError, ValidationError) as err:
                     edit_matter_rate_ref.current.error_text = str(err)
             else:
                 my_rate_str = (edit_matter_my_rate_ref.current.value or "").strip() if edit_matter_my_rate_ref.current else ""
@@ -2837,7 +2851,7 @@ class SentinelApp:
                         edit_matter_dialog_ref.current.open = False
                     refresh_list()
                     page.snack_bar = ft.SnackBar(ft.Text("Your rate for this matter updated."), open=True)
-                except ValueError as err:
+                except (ValidationError, PermissionError) as err:
                     if edit_matter_my_rate_ref.current:
                         edit_matter_my_rate_ref.current.error_text = str(err)
             page.update()
@@ -4402,7 +4416,7 @@ class SentinelApp:
                 return
             try:
                 data = db.export_full_database()
-            except ValueError as e:
+            except (InvalidBackupError, PermissionError) as e:
                 page.snack_bar = ft.SnackBar(content=ft.Text(str(e)))
                 page.snack_bar.open = True
                 page.update()
@@ -4457,7 +4471,7 @@ class SentinelApp:
                 return
             try:
                 db.import_full_database(data)
-            except ValueError as e:
+            except (InvalidBackupError, PermissionError) as e:
                 page.snack_bar = ft.SnackBar(content=ft.Text(str(e)))
                 page.snack_bar.open = True
                 page.update()

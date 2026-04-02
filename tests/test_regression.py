@@ -15,6 +15,7 @@ import bcrypt
 import pytest
 
 from database_manager import DatabaseManager
+from exceptions import MatterNotFoundError
 
 
 @pytest.mark.regression
@@ -102,7 +103,7 @@ class TestPrivacyRlsCheck:
         """Starting a timer on another user's matter raises (matter not found)."""
         client = db_user1.add_matter("C", "c", parent_id=None)
         project = db_user1.add_matter("P", "p", parent_id=client.id)
-        with pytest.raises(ValueError, match="Matter not found"):
+        with pytest.raises(MatterNotFoundError, match="no longer available"):
             db_user2.start_timer(project.id)
 
 

@@ -29,9 +29,24 @@ _UNSET = object()
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy import inspect, event
-from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import ProgrammingError, OperationalError
 
 from models import Base, Matter, MatterShare, TimeEntry, User, UserMatterRate
+
+from exceptions import (
+    SentinelError,
+    MatterNotFoundError,
+    TimeEntryNotFoundError,
+    UserNotFoundError,
+    RateResolutionError,
+    BudgetError,
+    BudgetExceededError,
+    PermissionError,
+    InvalidBackupError,
+    DatabaseIntegrityError,
+    DatabaseConnectionError,
+    ValidationError,
+)
 
 
 class DatabaseManager:
@@ -129,7 +144,7 @@ class DatabaseManager:
     def _require_user(self) -> None:
         """Raise if current_user_id is not set (required for matters/time_entries)."""
         if self._current_user_id is None:
-            raise ValueError("Current user is not set.")
+            raise PermissionError("access", "user resources")
 
     def _visible_matter_ids(self, session: Session) -> set[int]:
         """Matter IDs the current user can see (owned or shared). Used for SQLite filtering."""
@@ -694,7 +709,7 @@ class DatabaseManager:
         with self._session() as session:
             matter = self._matter_query(session).filter(Matter.id == matter_id).first()
             if matter is None:
-                raise ValueError("Matter not found.")
+                raise MatterNotFoundError(matter_id)
             if name is not None:
                 matter.name = name
             if matter_code is not None:
@@ -785,9 +800,9 @@ class DatabaseManager:
         with self._session() as session:
             matter = self._matter_query(session).filter(Matter.id == matter_id).first()
             if matter is None:
-                raise ValueError("Matter not found.")
+                raise MatterNotFoundError(matter_id)
             if matter.parent_id is None:
-                raise ValueError(
+                raise ValidationError(
                     "Time cannot be logged to a client; select a matter under a client."
                 )
             entry = TimeEntry(
@@ -843,7 +858,7 @@ class DatabaseManager:
         with self._session() as session:
             entry = self._time_entry_query(session).filter(TimeEntry.id == entry_id).first()
             if entry is None:
-                raise ValueError("Time entry not found.")
+                raise TimeEntryNotFoundError(entry_id)
             group_id = entry.activity_group_id if entry.activity_group_id is not None else entry.id
             new_entry = TimeEntry(
                 owner_id=entry.owner_id,
@@ -1104,7 +1119,7 @@ class DatabaseManager:
         self._require_user()
         with self._session() as session:
             if not self._is_admin(session):
-                raise ValueError("Only admin can export the full database.")
+                raise PermissionError("export", "full database")
             # Admin sees all rows: on PostgreSQL RLS policies grant admin full
             # SELECT access; on SQLite there is no RLS and we simply query all.
             users = session.query(User).order_by(User.id).all()
@@ -1173,15 +1188,15 @@ class DatabaseManager:
         """
         self._require_user()
         if not isinstance(data, dict):
-            raise ValueError("Invalid backup: not a dict.")
+            raise InvalidBackupError("not a dict.")
         for key in ("version", "users", "matters", "time_entries"):
             if key not in data:
-                raise ValueError(f"Invalid backup: missing '{key}'.")
+                raise InvalidBackupError(f"missing '{key}'")
         if data.get("version") != self.BACKUP_VERSION:
-            raise ValueError(f"Unsupported backup version: {data.get('version')}.")
+            raise InvalidBackupError(f"unsupported version: {data.get('version')}")
         with self._session() as session:
             if not self._is_admin(session):
-                raise ValueError("Only admin can import the full database.")
+                raise PermissionError("import", "full database")
             # Delete in FK order
             session.query(TimeEntry).delete(synchronize_session=False)
             session.query(MatterShare).delete(synchronize_session=False)
@@ -1267,21 +1282,21 @@ class DatabaseManager:
             x is not None for x in (start_time, end_time, duration_seconds)
         )
         if provided != 2:
-            raise ValueError(
+            raise ValidationError(
                 "Provide exactly two of start_time, end_time, duration_seconds."
             )
         if start_time is not None and end_time is not None:
             duration_seconds = (end_time - start_time).total_seconds()
             if duration_seconds < 0:
-                raise ValueError("End time must be after start time.")
+                raise ValidationError("End time must be after start time.")
         elif start_time is not None and duration_seconds is not None:
             if duration_seconds < 0:
-                raise ValueError("Duration must be non-negative.")
+                raise ValidationError("Duration must be non-negative.")
             end_time = start_time + timedelta(seconds=duration_seconds)
         else:
             assert end_time is not None and duration_seconds is not None
             if duration_seconds < 0:
-                raise ValueError("Duration must be non-negative.")
+                raise ValidationError("Duration must be non-negative.")
             start_time = end_time - timedelta(seconds=duration_seconds)
         return (start_time, end_time, duration_seconds)
 
@@ -1299,24 +1314,24 @@ class DatabaseManager:
         with self._session() as session:
             entry = self._time_entry_query(session).filter(TimeEntry.id == entry_id).first()
             if entry is None:
-                raise ValueError("Time entry not found.")
+                raise TimeEntryNotFoundError(entry_id)
             if description is not None:
                 entry.description = description
             if matter_id is not None:
                 matter = self._matter_query(session).filter(Matter.id == matter_id).first()
                 if matter is None:
-                    raise ValueError("Matter not found.")
+                    raise MatterNotFoundError(matter_id)
                 if matter.parent_id is None:
-                    raise ValueError("Time cannot be logged to a client.")
+                    raise ValidationError("Time cannot be logged to a client.")
                 entry.matter_id = matter_id
             time_args = [start_time, end_time, duration_seconds]
             if any(x is not None for x in time_args):
                 provided = sum(x is not None for x in time_args)
                 if provided == 3:
                     if duration_seconds is not None and duration_seconds < 0:
-                        raise ValueError("Duration must be non-negative.")
+                        raise ValidationError("Duration must be non-negative.")
                     if start_time and end_time and end_time < start_time:
-                        raise ValueError("End time must be after start time.")
+                        raise ValidationError("End time must be after start time.")
                     entry.start_time = start_time
                     entry.end_time = end_time
                     entry.duration_seconds = duration_seconds or 0.0
@@ -1335,7 +1350,7 @@ class DatabaseManager:
         with self._session() as session:
             entry = self._time_entry_query(session).filter(TimeEntry.id == entry_id).first()
             if entry is None:
-                raise ValueError("Time entry not found.")
+                raise TimeEntryNotFoundError(entry_id)
             session.delete(entry)
             session.commit()
 
@@ -1353,17 +1368,17 @@ class DatabaseManager:
         with self._session() as session:
             matter = self._matter_query(session).filter(Matter.id == matter_id).first()
             if matter is None:
-                raise ValueError("Matter not found.")
+                raise MatterNotFoundError(matter_id)
             if matter.parent_id is None:
-                raise ValueError("Time cannot be logged to a client.")
+                raise ValidationError("Time cannot be logged to a client.")
             provided = sum(
                 x is not None for x in (start_time, end_time, duration_seconds)
             )
             if provided == 3:
                 if duration_seconds is not None and duration_seconds < 0:
-                    raise ValueError("Duration must be non-negative.")
+                    raise ValidationError("Duration must be non-negative.")
                 if start_time and end_time and end_time < start_time:
-                    raise ValueError("End time must be after start time.")
+                    raise ValidationError("End time must be after start time.")
                 start_t, end_t, dur = (
                     start_time,
                     end_time,
@@ -1701,17 +1716,17 @@ class DatabaseManager:
         with self._session() as session:
             matter = self._matter_query(session).filter(Matter.id == matter_id).first()
             if matter is None:
-                raise ValueError("Matter not found.")
+                raise MatterNotFoundError(matter_id)
             if new_parent_id is not None:
                 if new_parent_id == matter_id:
-                    raise ValueError("Cannot move a matter to itself.")
+                    raise ValidationError("Cannot move a matter to itself.")
                 parent = self._matter_query(session).filter(
                     Matter.id == new_parent_id
                 ).first()
                 if parent is None:
-                    raise ValueError("New parent matter not found.")
+                    raise MatterNotFoundError(new_parent_id)
                 if self._is_descendant_of(session, new_parent_id, matter_id):
-                    raise ValueError(
+                    raise ValidationError(
                         "Cannot move a matter under one of its descendants."
                     )
             matter.parent_id = new_parent_id
@@ -1730,15 +1745,15 @@ class DatabaseManager:
                 Matter.id == target_matter_id
             ).first()
             if source is None:
-                raise ValueError("Source matter not found.")
+                raise MatterNotFoundError(source_matter_id)
             if target is None:
-                raise ValueError("Target matter not found.")
+                raise MatterNotFoundError(target_matter_id)
             if source_matter_id == target_matter_id:
-                raise ValueError("Cannot merge a matter into itself.")
+                raise ValidationError("Cannot merge a matter into itself.")
             if self._is_descendant_of(
                 session, target_matter_id, source_matter_id
             ):
-                raise ValueError(
+                raise ValidationError(
                     "Cannot merge into a descendant of the source matter."
                 )
             self._time_entry_query(session).filter(
@@ -1760,7 +1775,7 @@ class DatabaseManager:
                 Matter.id == target_matter_id
             ).first()
             if target is None or target.owner_id != self._current_user_id:
-                raise ValueError("Target matter not found or not owned by you.")
+                raise MatterNotFoundError(target_matter_id)
             if self._engine.dialect.name == "postgresql":
                 try:
                     row = session.execute(
@@ -1777,23 +1792,23 @@ class DatabaseManager:
                     if "merge_other_matter_into" not in str(exc):
                         raise
                     session.rollback()
-                    raise RuntimeError(
+                    raise DatabaseError(
                         "PostgreSQL function app.merge_other_matter_into is missing. "
                         "Re-run scripts/postgres_bootstrap_login.sql as a superuser."
                     ) from exc
                 if row and row[0] is not None:
-                    raise ValueError(row[0])
+                    raise DatabaseError(row[0])
                 session.commit()
                 return
             source = (
                 session.query(Matter).filter(Matter.id == source_matter_id).first()
             )
             if source is None:
-                raise ValueError("Source matter not found.")
+                raise MatterNotFoundError(source_matter_id)
             if source_matter_id == target_matter_id:
-                raise ValueError("Cannot merge a matter into itself.")
+                raise ValidationError("Cannot merge a matter into itself.")
             if self._is_descendant_of(session, target_matter_id, source_matter_id):
-                raise ValueError(
+                raise ValidationError(
                     "Cannot merge into a descendant of the source matter."
                 )
             session.query(TimeEntry).filter(
@@ -1817,11 +1832,11 @@ class DatabaseManager:
         with self._session() as session:
             matter = self._matter_query(session).filter(Matter.id == matter_id).first()
             if matter is None:
-                raise ValueError("Matter not found.")
+                raise MatterNotFoundError(matter_id)
             if matter.owner_id != self._current_user_id:
-                raise ValueError("Only the matter owner can share it.")
+                raise PermissionError("share", f"matter {matter_id}")
             if user_id == self._current_user_id:
-                raise ValueError("Cannot share with yourself.")
+                raise ValidationError("Cannot share a matter with yourself.")
             existing = (
                 session.query(MatterShare)
                 .filter(MatterShare.matter_id == matter_id, MatterShare.user_id == user_id)
@@ -1838,9 +1853,9 @@ class DatabaseManager:
         with self._session() as session:
             matter = self._matter_query(session).filter(Matter.id == matter_id).first()
             if matter is None:
-                raise ValueError("Matter not found.")
+                raise MatterNotFoundError(matter_id)
             if matter.owner_id != self._current_user_id:
-                raise ValueError("Only the matter owner can remove a share.")
+                raise PermissionError("remove share", f"matter {matter_id}")
             session.query(MatterShare).filter(
                 MatterShare.matter_id == matter_id,
                 MatterShare.user_id == user_id,
@@ -1853,7 +1868,7 @@ class DatabaseManager:
         with self._session() as session:
             matter = self._matter_query(session).filter(Matter.id == matter_id).first()
             if matter is None:
-                raise ValueError("Matter not found.")
+                raise MatterNotFoundError(matter_id)
             if matter.owner_id != self._current_user_id:
                 return []
             rows = (
@@ -1873,7 +1888,7 @@ class DatabaseManager:
         with self._session() as session:
             matter = self._matter_query(session).filter(Matter.id == matter_id).first()
             if matter is None:
-                raise ValueError("Matter not found.")
+                raise MatterNotFoundError(matter_id)
             result: list[tuple[int, str, float | None]] = []
             owner = session.query(User).filter(User.id == matter.owner_id).first()
             if owner:
@@ -1922,7 +1937,7 @@ class DatabaseManager:
                     if "list_users_for_share" not in str(exc):
                         raise
                     session.rollback()
-                    raise RuntimeError(
+                    raise DatabaseError(
                         "PostgreSQL function app.list_users_for_share is missing. "
                         "Re-run scripts/postgres_bootstrap_login.sql as a superuser."
                     ) from exc
@@ -1942,12 +1957,12 @@ class DatabaseManager:
         with self._session() as session:
             matter = self._matter_query(session).filter(Matter.id == matter_id).first()
             if matter is None:
-                raise ValueError("Matter not found.")
+                raise MatterNotFoundError(matter_id)
             visible = self._visible_matter_ids(session)
             if matter_id not in visible:
-                raise ValueError("Matter not found or no access.")
+                raise MatterNotFoundError(matter_id)
             if user_id != self._current_user_id and matter.owner_id != self._current_user_id:
-                raise ValueError("Only the matter owner or the user can set that user's rate.")
+                raise PermissionError("set rate", f"matter {matter_id}")
             existing = (
                 session.query(UserMatterRate)
                 .filter(UserMatterRate.user_id == user_id, UserMatterRate.matter_id == matter_id)
@@ -1989,6 +2004,10 @@ class DatabaseManager:
                         raise
                     # Clear failed transaction before falling back to ORM-based lookup.
                     session.rollback()
+                    raise DatabaseError(
+                        "PostgreSQL function app.get_owned_matter_paths is missing. "
+                        "Re-run scripts/postgres_bootstrap_login.sql as a superuser."
+                    ) from exc
                     rows = []
                 for r in rows:
                     if r[1] == full_path:
@@ -2229,7 +2248,7 @@ class DatabaseManager:
                     },
                 ).fetchone()
                 if not row or row[0] is None:
-                    raise ValueError("Only admin can create users.")
+                    raise PermissionError("create", "user")
                 session.commit()
                 new_id = int(row[0])
                 return User(
@@ -2245,7 +2264,7 @@ class DatabaseManager:
                 .first()
             )
             if not admin:
-                raise ValueError("Only admin can create users.")
+                raise PermissionError("create users", "the system")
             user = User(
                 username=username,
                 password_hash=password_hash,
@@ -2287,7 +2306,7 @@ class DatabaseManager:
         with self._session() as session:
             user = session.query(User).filter(User.id == user_id).first()
             if user is None:
-                raise ValueError("User not found.")
+                raise UserNotFoundError(user_id)
             if self._engine.dialect.name == "sqlite":
                 is_self = user_id == self._current_user_id
                 admin = (
@@ -2296,10 +2315,10 @@ class DatabaseManager:
                     .first()
                 )
                 if not is_self and (not admin or not admin.is_admin):
-                    raise ValueError("Only admin can update other users.")
+                    raise PermissionError("update", f"user {user_id}")
                 if not is_self and is_admin is not None:
                     if not admin or not admin.is_admin:
-                        raise ValueError("Only admin can change is_admin.")
+                        raise PermissionError("change", "is_admin")
             if username is not None:
                 user.username = username
             if password_hash is not None:
@@ -2329,10 +2348,10 @@ class DatabaseManager:
                     .first()
                 )
                 if not admin:
-                    raise ValueError("Only admin can delete users.")
+                    raise PermissionError("delete", "user")
             user = session.query(User).filter(User.id == user_id).first()
             if user is None:
-                raise ValueError("User not found.")
+                raise UserNotFoundError(user_id)
             session.delete(user)
             session.commit()
 

@@ -19,6 +19,7 @@ from datetime import date, datetime, timedelta
 import pytest
 
 from database_manager import DatabaseManager
+from exceptions import PermissionError, TimeEntryNotFoundError, MatterNotFoundError, InvalidBackupError
 
 
 # --- Hierarchical matter creation ---
@@ -168,8 +169,8 @@ class TestOwnerFiltering:
         """Starting a timer requires the matter to belong to the current user."""
         client = db_user1.add_matter("Client", "client", parent_id=None)
         project = db_user1.add_matter("Project", "project", parent_id=client.id)
-        # User2 tries to start timer on user1's matter -> Matter not found (filtered out)
-        with pytest.raises(ValueError, match="Matter not found"):
+        # User2 tries to start timer on user1's matter -> MatterNotFoundError (filtered out)
+        with pytest.raises(MatterNotFoundError, match="no longer available"):
             db_user2.start_timer(project.id)
 
     def test_time_entries_are_owner_scoped(self, db_user1: DatabaseManager, db_user2: DatabaseManager):
@@ -465,7 +466,7 @@ class TestContinueTimeEntry:
 
     def test_continue_time_entry_invalid_id_raises(self, db_user1: DatabaseManager):
         """continue_time_entry with non-existent or other user's entry raises."""
-        with pytest.raises(ValueError, match="not found"):
+        with pytest.raises(TimeEntryNotFoundError, match="no longer available"):
             db_user1.continue_time_entry(99999)
 
 
@@ -494,7 +495,7 @@ class TestDeleteTimeEntry:
 
     def test_delete_time_entry_invalid_id_raises(self, db_user1: DatabaseManager):
         """delete_time_entry with non-existent id raises."""
-        with pytest.raises(ValueError, match="Time entry not found"):
+        with pytest.raises(TimeEntryNotFoundError, match="no longer available"):
             db_user1.delete_time_entry(99999)
 
     def test_delete_time_entry_other_users_entry_raises(
@@ -509,7 +510,7 @@ class TestDeleteTimeEntry:
         entry = db_user1.add_manual_time_entry(
             project.id, "User1 work", start_time=start, end_time=end
         )
-        with pytest.raises(ValueError, match="Time entry not found"):
+        with pytest.raises(TimeEntryNotFoundError, match="no longer available"):
             db_user2.delete_time_entry(entry.id)
 
 
@@ -649,9 +650,9 @@ class TestBackupRestore:
         assert data["time_entries"] == []
 
     def test_export_full_database_non_admin_raises(self, db_user2: DatabaseManager):
-        """Non-admin export raises ValueError."""
+        """Non-admin export raises PermissionError."""
         db_user2.add_matter("X", "x", parent_id=None)
-        with pytest.raises(ValueError, match="Only admin can export"):
+        with pytest.raises(PermissionError, match="You do not have permission"):
             db_user2.export_full_database()
 
     def test_import_full_database_round_trip(self, db_user1: DatabaseManager, db_user2: DatabaseManager):
@@ -674,11 +675,11 @@ class TestBackupRestore:
 
     def test_import_full_database_invalid_data_raises(self, db_user1: DatabaseManager):
         """Import with missing keys or bad version raises."""
-        with pytest.raises(ValueError, match="not a dict"):
+        with pytest.raises(InvalidBackupError, match="not a dict"):
             db_user1.import_full_database([])
-        with pytest.raises(ValueError, match="missing"):
+        with pytest.raises(InvalidBackupError, match="missing"):
             db_user1.import_full_database({"version": 1})
-        with pytest.raises(ValueError, match="Unsupported backup version"):
+        with pytest.raises(InvalidBackupError, match="unsupported version"):
             db_user1.import_full_database(
                 {"version": 99, "users": [], "matters": [], "time_entries": []}
             )
@@ -686,7 +687,7 @@ class TestBackupRestore:
     def test_import_full_database_non_admin_raises(self, db_user2: DatabaseManager, db_user1: DatabaseManager):
         """Non-admin cannot import."""
         data = db_user1.export_full_database()
-        with pytest.raises(ValueError, match="Only admin can import"):
+        with pytest.raises(PermissionError, match="You do not have permission"):
             db_user2.import_full_database(data)
 
 
@@ -706,14 +707,14 @@ class TestRequireUser:
         pw = bcrypt.hashpw(b"x", bcrypt.gensalt()).decode("utf-8")
         dm.create_first_admin("u", pw)
         dm_no_user = DatabaseManager(db_path=db_path, current_user_id=None)
-        with pytest.raises(ValueError, match="Current user is not set"):
+        with pytest.raises(PermissionError, match="You do not have permission"):
             dm_no_user.add_matter("X", "x", parent_id=None)
 
     def test_get_all_matters_requires_user(self, db_path):
         """get_all_matters with no current_user_id raises."""
         dm = DatabaseManager(db_path=db_path)
         dm.init_db()
-        with pytest.raises(ValueError, match="Current user is not set"):
+        with pytest.raises(PermissionError, match="You do not have permission"):
             dm.get_all_matters()
 
 
